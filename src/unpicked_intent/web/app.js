@@ -281,14 +281,26 @@ function renderTeamButtonHtml(team) {
 
 /* ---------- Recommended Actions (strictly from API fields) ---------- */
 
+const ACTION_LEAD_MAX_P = 0.05;
+
+function isQualifyingActionLead(tell) {
+  if (tell.label === "strong") return false;
+  if (tell.p_value === null || tell.p_value === undefined || tell.p_value === "") {
+    return false;
+  }
+  const p = Number(tell.p_value);
+  return Number.isFinite(p) && p < ACTION_LEAD_MAX_P;
+}
+
 function buildRecommendedActions(report, isSelfScout) {
   const actions = [];
   const tells = Array.isArray(report.left_open) ? report.left_open : [];
   const bans = Array.isArray(report.early_ban) ? report.early_ban : [];
 
-  // Prioritize strong tells first, then lowest p-value leads (up to 3 tells).
+  // Prioritize strong tells first, then leads with p_value < 0.05 (up to 3 tells).
+  // If no leads qualify, show only strong tells and early bans.
   const strongTells = tells.filter((t) => t.label === "strong");
-  const leadTells = tells.filter((t) => t.label !== "strong");
+  const leadTells = tells.filter(isQualifyingActionLead);
   const topTells = [...strongTells, ...leadTells].slice(0, 3);
 
   for (const tell of topTells) {
@@ -296,20 +308,31 @@ function buildRecommendedActions(report, isSelfScout) {
     const taken = Number(tell.taken);
     const k = Number(tell.k);
     const underExpected = taken < Number(tell.expected);
+    const isStrong = tell.label === "strong";
 
     let line;
     if (isSelfScout) {
-      line = underExpected
-        ? `Opponents see ${tell.player_name} took ${tell.champion} in ${taken} of ${k} games where it was open (about ${exp} expected). They may leave it open.`
-        : `Opponents see ${tell.player_name} took ${tell.champion} in ${taken} of ${k} games where it was open (about ${exp} expected).`;
+      if (underExpected) {
+        const tail = isStrong
+          ? "They may leave it open."
+          : "So far, leaving it open has rarely drawn it.";
+        line = `Opponents see ${tell.player_name} took ${tell.champion} in ${taken} of ${k} games where it was open (about ${exp} expected). ${tail}`;
+      } else {
+        line = `Opponents see ${tell.player_name} took ${tell.champion} in ${taken} of ${k} games where it was open (about ${exp} expected).`;
+      }
     } else {
-      line = underExpected
-        ? `${tell.player_name} has taken ${tell.champion} in ${taken} of ${k} games where it was open (about ${exp} expected). Leaving it open rarely draws it.`
-        : `${tell.player_name} has taken ${tell.champion} in ${taken} of ${k} games where it was open (about ${exp} expected).`;
+      if (underExpected) {
+        const tail = isStrong
+          ? "Leaving it open rarely draws it."
+          : "So far, leaving it open has rarely drawn it.";
+        line = `${tell.player_name} has taken ${tell.champion} in ${taken} of ${k} games where it was open (about ${exp} expected). ${tail}`;
+      } else {
+        line = `${tell.player_name} has taken ${tell.champion} in ${taken} of ${k} games where it was open (about ${exp} expected).`;
+      }
     }
 
     actions.push({
-      kind: tell.label === "strong" ? "strong" : "lead",
+      kind: isStrong ? "strong" : "lead",
       text: line,
     });
   }

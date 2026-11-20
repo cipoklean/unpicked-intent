@@ -322,3 +322,22 @@ class TestWebUI:
         for path in concrete_paths:
             resp = client.get(path)
             assert resp.status_code == 200, f"JS endpoint '{path}' returned {resp.status_code}"
+
+    def test_self_scout_banner_and_lead_action_wording(self):
+        """Self-scout banner uses hedged wording and action list hedges leads with p < 0.05."""
+        client = TestClient(api_mod.app)
+
+        html = client.get("/").text
+        assert (
+            "This is the exact Fearless Draft Silence Report opposing coaches see for Cloud9 Kia"
+            not in html
+        )
+        assert (
+            "This is what an opponent could read from Cloud9 Kia's own drafts using this report"
+            in html
+        )
+
+        js = client.get("/app.js").text
+        assert "So far, leaving it open has rarely drawn it." in js
+        assert "Leaving it open rarely draws it." in js
+        assert "ACTION_LEAD_MAX_P = 0.05" in js
