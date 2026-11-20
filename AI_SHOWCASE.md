@@ -94,5 +94,6 @@ Junie implemented; decisions that change what the tool *claims* stayed with me:
 | 2026-11-20 | 34a80e0 | Explicit-column reads (#13) | 116 |
 | 2026-11-20 | 19d7651 | Non-vacuous E2E test, `names` table, read-only scouting API | 127 |
 | 2026-11-20 | 26e73e7 | Silence Report web UI + self-scout toggle (UI designed by Gemini in Junie; offline HTML/CSS/JS via FastAPI `StaticFiles`) | 130 |
+| 2026-11-20 | e13cf46 | Web UI wording fixes: hedge lead action lines (`p < 0.05`) in opponent & self-scout views, update self-scout banner copy | 131 |
 
 *Next: scouting API, UI, video. Screenshots of Junie sessions in PyCharm go here.*
