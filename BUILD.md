@@ -37,7 +37,7 @@ plus a draft-replay UI a coach steps through slot by slot.
   2026-active opponents: FlyQuest, Team Liquid, LYON, Shopify Rebellion,
   Disguised, Dignitas, Sentinels. (100T, LOUD are 2025-only.)
 - Cloud9 Kia: 45 Fearless series / 134 games → self-scout mode viable.
-- Patch windows: use **3 last-played patches** (16.5, 16.12, 16.13 have no
+- Patch windows (amended 2026-11-20 by David): **at least 3 last-played patches, extended back until the window holds ≥100 games** (MIN_WINDOW_GAMES; late 2026 patches have 2–6 games). Originally: use **3 last-played patches** (16.5, 16.12, 16.13 have no
   games — competitive skipped them) or trailing ~8 weeks.
 - LCK alone: 209 Fearless series → cross-region prior fallback if needed.
 
@@ -100,7 +100,7 @@ contested champions more often).
 ## Baseline vs. observed (the two scoring jobs)
 
 - **Baseline (fat):** expected pick/ban rates keyed on
-  **3-played-patch window × role**, pooled over **all regions** (1,563
+  **played-patch window (≥3 patches, ≥100 games) × role**, pooled over **all regions** (1,563
   games). LCS-only rate shown as context only. Feeds the meta-relevant
   flag and the binomial expectation.
 - **Observed (thin):** pooled per opponent across the whole split; each
