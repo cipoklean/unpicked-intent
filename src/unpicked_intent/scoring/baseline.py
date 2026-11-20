@@ -27,6 +27,7 @@ import duckdb
 
 META_PRESENCE = 0.10  # Champion must appear in ≥10% of games to be meta-relevant
 MIN_BANS = 10  # Minimum bans to compute mean_ban_slot
+MIN_WINDOW_GAMES = 100  # Window extends back until it holds at least this many games
 
 DERIVED = Path(__file__).resolve().parents[3] / "derived"
 DB_PATH = DERIVED / "unpicked.duckdb"
@@ -45,16 +46,23 @@ def _patch_sort_key(patch: str):
     return (0, 0)
 
 
-def played_patch_windows(patches: list[str], width: int = 3) -> dict[str, list[str]]:
+def played_patch_windows(
+    patches: list[str],
+    games_per_patch: dict[str, int],
+    width: int = 3,
+) -> dict[str, list[str]]:
     """Map each played patch to a rolling window of itself + previous played patches.
 
     Sorts patches numerically (16.10 comes after 16.9) and keeps only patches
-    that have games. Each patch maps to itself plus the `width-1` previous
-    played patches. The first patches get shorter windows.
+    that have games. For each patch P, start with P and the 2 previous played
+    patches, then keep adding earlier played patches until the window's total
+    games >= MIN_WINDOW_GAMES or no earlier patch is left. The first patches
+    get shorter windows (stop at what's available).
 
     Args:
         patches: List of patch strings that have games (e.g. from champion_game table).
-        width: Window size (default 3: current + 2 previous).
+        games_per_patch: Dict mapping patch -> number of complete games in that patch.
+        width: Minimum window size (default 3: current + 2 previous).
 
     Returns:
         Dict mapping each patch (as string) to its window list.
@@ -65,9 +73,19 @@ def played_patch_windows(patches: list[str], width: int = 3) -> dict[str, list[s
 
     windows: dict[str, list[str]] = {}
     for i, patch in enumerate(unique_patches):
-        # Window includes current patch and up to width-1 previous patches
+        # Start with current patch and up to width-1 previous patches
         start = max(0, i - width + 1)
-        windows[patch] = unique_patches[start: i + 1]
+        window = unique_patches[start: i + 1]
+
+        # Extend window backwards until it holds at least MIN_WINDOW_GAMES
+        window_games = sum(games_per_patch.get(wp, 0) for wp in window)
+        while window_games < MIN_WINDOW_GAMES and start > 0:
+            start -= 1
+            new_patch = unique_patches[start]
+            window = unique_patches[start: i + 1]
+            window_games = sum(games_per_patch.get(wp, 0) for wp in window)
+
+        windows[patch] = window
 
     return windows
 
@@ -101,16 +119,19 @@ def compute_baseline(
     """
     # Build patch windows
     patches = [row["patch"] for row in champion_game_rows]
-    windows = played_patch_windows(patches, width)
+
+    # Compute games per patch
+    games_by_patch_set: dict[str, set[tuple[str, int]]] = defaultdict(set)
+    for row in champion_game_rows:
+        games_by_patch_set[row["patch"]].add((row["series_id"], row["game_num"]))
+    games_per_patch = {patch: len(games) for patch, games in games_by_patch_set.items()}
+
+    windows = played_patch_windows(patches, games_per_patch, width)
 
     if not windows:
         return []
 
     # Group champion_game rows by (patch, champion)
-    # First, build a set of (series_id, game_num) per patch for game counting
-    games_by_patch: dict[str, set[tuple[str, int]]] = defaultdict(set)
-    for row in champion_game_rows:
-        games_by_patch[row["patch"]].add((row["series_id"], row["game_num"]))
 
     # For presence: games where anyone picked or banned the champion
     # "picked" = taken by either team; "banned" = banned this game
@@ -148,11 +169,11 @@ def compute_baseline(
     baseline_rows: list[dict] = []
     for newest_patch, window_patches in windows.items():
         # Aggregate over the window
-        # Total games in window (union of games across window patches)
-        window_games: set[tuple[str, int]] = set()
-        for wp in window_patches:
-            window_games |= games_by_patch.get(wp, set())
-        num_games = len(window_games) if window_games else 1  # avoid div by zero
+        # Total games in window (sum of games_per_patch across window patches)
+        window_game_count = sum(games_per_patch.get(wp, 0) for wp in window_patches)
+        num_games = window_game_count if window_game_count > 0 else 1  # avoid div by zero
+
+        window_start = window_patches[0] if window_patches else newest_patch
 
         for champion in sorted(all_champions):
             role = champion_roles.get(champion, "unknown")
@@ -201,6 +222,8 @@ def compute_baseline(
                 "presence": round(presence, 6),
                 "meta_relevant": meta_relevant,
                 "mean_ban_slot": round(mean_ban_slot, 4) if mean_ban_slot is not None else None,
+                "window_start": window_start,
+                "window_games": window_game_count,
             })
 
     return baseline_rows
@@ -255,6 +278,8 @@ def run_baseline(grid_path: str | None = None) -> None:
             presence      DOUBLE NOT NULL,
             meta_relevant BOOLEAN NOT NULL,
             mean_ban_slot DOUBLE,
+            window_start  VARCHAR NOT NULL,
+            window_games  INTEGER NOT NULL,
             PRIMARY KEY (patch, champion)
         )
     """)
@@ -265,11 +290,12 @@ def run_baseline(grid_path: str | None = None) -> None:
                 r["patch"], r["champion"], r["role"],
                 r["taken"], r["skipped"], r["pick_rate"],
                 r["presence"], r["meta_relevant"], r["mean_ban_slot"],
+                r["window_start"], r["window_games"],
             )
             for r in baseline_rows
         ]
         con.executemany(
-            "INSERT INTO baseline VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO baseline VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             tuples,
         )
 

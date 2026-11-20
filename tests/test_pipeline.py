@@ -1128,16 +1128,18 @@ class TestBaseline:
         from unpicked_intent.scoring.baseline import played_patch_windows
 
         # Simulate: 16.4, 16.9, 16.10, 16.11 (16.5, 16.6-8 not played)
+        # Each patch has enough games so 3 patches >= MIN_WINDOW_GAMES
         patches = ["16.4", "16.9", "16.10", "16.11"]
-        windows = played_patch_windows(patches, width=3)
+        games_per_patch = {p: 50 for p in patches}
+        windows = played_patch_windows(patches, games_per_patch, width=3)
 
         # First patch gets window of 1
         assert windows["16.4"] == ["16.4"]
         # Second gets 2
         assert windows["16.9"] == ["16.4", "16.9"]
-        # Third gets 3
+        # Third gets 3 (150 games >= 100)
         assert windows["16.10"] == ["16.4", "16.9", "16.10"]
-        # Fourth gets 3 (drops oldest)
+        # Fourth gets 3 (150 games >= 100, no extension needed)
         assert windows["16.11"] == ["16.9", "16.10", "16.11"]
 
     def test_played_patch_windows_numeric_order(self):
@@ -1146,7 +1148,8 @@ class TestBaseline:
 
         # Mix of patches where string sort would be wrong
         patches = ["16.10", "16.9", "16.2"]
-        windows = played_patch_windows(patches, width=3)
+        games_per_patch = {p: 50 for p in patches}
+        windows = played_patch_windows(patches, games_per_patch, width=3)
 
         # Sorted numerically: 16.2, 16.9, 16.10
         assert windows["16.2"] == ["16.2"]
@@ -1277,11 +1280,83 @@ class TestBaseline:
         assert a_row["meta_relevant"] is True  # exactly at threshold
 
     def test_baseline_constants(self):
-        """META_PRESENCE and MIN_BANS are named constants."""
-        from unpicked_intent.scoring.baseline import META_PRESENCE, MIN_BANS
+        """META_PRESENCE, MIN_BANS, and MIN_WINDOW_GAMES are named constants."""
+        from unpicked_intent.scoring.baseline import META_PRESENCE, MIN_BANS, MIN_WINDOW_GAMES
 
         assert META_PRESENCE == 0.10
         assert MIN_BANS == 10
+        assert MIN_WINDOW_GAMES == 100
+
+    def test_window_thick_stays_at_3_patches(self):
+        """A window that already has 100+ games across 3 patches stays at 3 patches."""
+        from unpicked_intent.scoring.baseline import played_patch_windows, MIN_WINDOW_GAMES
+
+        # 5 patches, each with 50 games → 3 patches = 150 >= 100
+        patches = ["16.10", "16.11", "16.12", "16.13", "16.14"]
+        games_per_patch = {p: 50 for p in patches}
+        windows = played_patch_windows(patches, games_per_patch, width=3)
+
+        # First two patches get shorter windows (not enough earlier patches)
+        assert windows["16.10"] == ["16.10"]
+        assert windows["16.11"] == ["16.10", "16.11"]
+        # Patches 3-5: 3 patches each (150 games >= 100, no extension needed)
+        assert windows["16.12"] == ["16.10", "16.11", "16.12"]
+        assert windows["16.13"] == ["16.11", "16.12", "16.13"]
+        assert windows["16.14"] == ["16.12", "16.13", "16.14"]
+
+    def test_window_thin_extends(self):
+        """A thin window extends backwards until it holds at least MIN_WINDOW_GAMES."""
+        from unpicked_intent.scoring.baseline import played_patch_windows, MIN_WINDOW_GAMES
+
+        # 5 patches: first 3 have 20 games each, last 2 have 40 each
+        # Window for 16.12: [16.10, 16.11, 16.12] = 60 games < 100 → extends to include 16.9
+        # [16.9, 16.10, 16.11, 16.12] = 80 games < 100 → extends to include 16.8
+        # [16.8, 16.9, 16.10, 16.11, 16.12] = 100 games >= 100 → stops
+        patches = ["16.8", "16.9", "16.10", "16.11", "16.12"]
+        games_per_patch = {"16.8": 20, "16.9": 20, "16.10": 20, "16.11": 20, "16.12": 20}
+        windows = played_patch_windows(patches, games_per_patch, width=3)
+
+        # 16.10: [16.9, 16.10] = 40 < 100 → extends to [16.8, 16.9, 16.10] = 60 < 100
+        # no more patches → stops at 3
+        assert windows["16.10"] == ["16.8", "16.9", "16.10"]
+        # 16.11: [16.9, 16.10, 16.11] = 60 < 100 → extends to [16.8, 16.9, 16.10, 16.11] = 80 < 100
+        # no more → stops at 4
+        assert windows["16.11"] == ["16.8", "16.9", "16.10", "16.11"]
+        # 16.12: [16.10, 16.11, 16.12] = 60 < 100 → extends to [16.9, 16.10, 16.11, 16.12] = 80 < 100
+        # extends to [16.8, 16.9, 16.10, 16.11, 16.12] = 100 >= 100 → stops
+        assert windows["16.12"] == ["16.8", "16.9", "16.10", "16.11", "16.12"]
+
+    def test_window_first_patches_stop_early(self):
+        """At the very first patches, the window stops at what's available."""
+        from unpicked_intent.scoring.baseline import played_patch_windows, MIN_WINDOW_GAMES
+
+        # Only 2 patches, each with 30 games → total 60 < 100, but nothing more to extend
+        patches = ["16.1", "16.2"]
+        games_per_patch = {"16.1": 30, "16.2": 30}
+        windows = played_patch_windows(patches, games_per_patch, width=3)
+
+        assert windows["16.1"] == ["16.1"]
+        assert windows["16.2"] == ["16.1", "16.2"]
+
+    def test_window_start_and_window_games_columns(self):
+        """Baseline rows include window_start and window_games columns."""
+        from unpicked_intent.scoring.baseline import compute_baseline
+
+        cg_rows = [
+            {"series_id": "S1", "game_num": 1, "team": "T1", "champion": "A",
+             "resolution": "taken", "patch": "16.20"},
+            {"series_id": "S1", "game_num": 1, "team": "T2", "champion": "A",
+             "resolution": "skipped", "patch": "16.20"},
+        ]
+        draft_events = []
+        champion_roles = {"A": "top"}
+
+        baseline = compute_baseline(cg_rows, draft_events, champion_roles)
+        a_row = [r for r in baseline if r["champion"] == "A"][0]
+        assert "window_start" in a_row
+        assert "window_games" in a_row
+        assert a_row["window_start"] == "16.20"
+        assert a_row["window_games"] == 1
 
     def test_derived_path_next_to_pyproject(self):
         """DERIVED in baseline.py resolves to the repo root's derived/ folder."""
