@@ -152,9 +152,11 @@ def assign_slots(events: list[dict]) -> tuple[list[dict], NormalizeStats]:
     GRID's sequenceNumber is the draft slot (1-20).  An undo carries the
     same seq as the action it undoes.  Slot = seq, phase = _phase_from_seq(seq).
 
-    Derives each team's side from the draft itself: the team acting at seq 1
-    is blue, the other is red.  Stores the games.csv side as meta_side and
-    counts disagreements between derived side and meta_side.
+    Derives each team's side from the draft itself using majority vote across
+    all 20 slots: for each team, count how many of its actions match the blue
+    side of DRAFT_SIDE_ORDER vs the red side.  The side with the majority wins.
+    Stores the games.csv side as meta_side and counts disagreements between
+    derived side and meta_side.
 
     Also checks that the acting team's derived side matches the standard pro
     draft order for that slot and counts mismatches.
@@ -171,28 +173,39 @@ def assign_slots(events: list[dict]) -> tuple[list[dict], NormalizeStats]:
     for game_id in sorted(by_game.keys()):
         game_events = sorted(by_game[game_id], key=_sort_key)
 
-        # Derive side from draft: team acting at seq 1 is blue
-        blue_team = None
+        # Derive side from draft using majority vote across all 20 slots.
+        # For each team, count how many of its actions fall on blue slots vs
+        # red slots in DRAFT_SIDE_ORDER. The side with the majority wins.
+        # This handles the edge case where seq 1 is credited to the wrong team.
+        team_blue_votes: dict[str, int] = defaultdict(int)
+        team_red_votes: dict[str, int] = defaultdict(int)
+        teams: set[str] = set()
         for ev in game_events:
-            if ev.get("seq") == 1:
-                blue_team = ev["team"]
-                break
+            seq = ev.get("seq")
+            if seq is not None and 1 <= seq <= len(DRAFT_SIDE_ORDER):
+                tid = ev["team"]
+                teams.add(tid)
+                expected = DRAFT_SIDE_ORDER[seq - 1]
+                if expected == "blue":
+                    team_blue_votes[tid] += 1
+                else:
+                    team_red_votes[tid] += 1
 
-        # Build team -> derived side mapping
+        # Build team -> derived side mapping from majority vote
         team_side: dict[str, str] = {}
         meta_side_mismatch = False
-        if blue_team is not None:
+        for tid in teams:
+            blue_v = team_blue_votes.get(tid, 0)
+            red_v = team_red_votes.get(tid, 0)
+            team_side[tid] = "blue" if blue_v >= red_v else "red"
+            # Check against meta_side from games.csv
+            meta_side = None
             for ev in game_events:
-                tid = ev["team"]
-                if tid not in team_side:
-                    if tid == blue_team:
-                        team_side[tid] = "blue"
-                    else:
-                        team_side[tid] = "red"
-                    # Check against meta_side from games.csv
+                if ev["team"] == tid:
                     meta_side = ev.get("meta_side")
-                    if meta_side is not None and team_side[tid] != meta_side:
-                        meta_side_mismatch = True
+                    break
+            if meta_side is not None and team_side[tid] != meta_side:
+                meta_side_mismatch = True
 
         if meta_side_mismatch:
             stats.meta_side_disagreements += 1

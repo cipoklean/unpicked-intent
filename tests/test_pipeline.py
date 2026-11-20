@@ -1,5 +1,6 @@
 """Tests for ingest and pipeline stages using synthetic fixtures."""
 
+import csv
 import pytest
 from pathlib import Path
 from unittest.mock import patch
@@ -13,11 +14,47 @@ from unpicked_intent.pipeline.normalize import (
     NormalizeStats,
     DRAFT_SIDE_ORDER,
 )
+from unpicked_intent.pipeline.legal_pool import (
+    legal_pool,
+    resolve_champion_games,
+    _burned_champions,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 FEED = str(FIXTURES / "events_SYN-2_grid.jsonl.zst")
 FEED3 = str(FIXTURES / "events_SYN-3_grid.jsonl.zst")
 GAMES_CSV = str(FIXTURES / "games.csv")
+
+
+def _load_champion_roles() -> dict[str, str]:
+    """Load the champion→role mapping from static/champion_roles.csv."""
+    roles_path = Path(__file__).parent.parent / "static" / "champion_roles.csv"
+    roles: dict[str, str] = {}
+    with open(roles_path, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            roles[row["champion"]] = row["role"]
+    return roles
+
+
+def _make_minimal_roles() -> dict[str, str]:
+    """Return a minimal champion→role dict covering the synthetic fixture champions."""
+    # Champions used in synthetic fixtures (G1 after undo folding + G3/G4)
+    champs = [
+        # G1 bans: K'Sante, Azir, Viktor, Orianna, Syndra, LeBlanc, Ahri, Yasuo, Yone, Zed
+        "K'Sante", "Azir", "Viktor", "Orianna", "Syndra", "LeBlanc", "Ahri", "Yasuo", "Yone", "Zed",
+        # G1 picks: Lee Sin, Thresh, Graves, Jinx, Warwick, Soraka (T1) +
+        #           Darius, Malphite, Caitlyn, Nautilus (T2)
+        "Lee Sin", "Thresh", "Graves", "Jinx", "Warwick", "Soraka",
+        "Darius", "Malphite", "Caitlyn", "Nautilus",
+        # G2 bans: Ryze, Sion, Sivir, Annie, Nunu & Willump
+        "Ryze", "Sion", "Sivir", "Annie", "Nunu & Willump",
+        # G2 picks: Aatrox, Camille, Hecarim, Fiora, Braum
+        "Aatrox", "Camille", "Hecarim", "Fiora", "Braum",
+        # G3/G4 picks: Kalista (also in G1 but undone)
+        "Kalista",
+    ]
+    return {c: "mid" for c in champs}
 
 
 def _load_all():
@@ -376,6 +413,35 @@ class TestAssignSlots:
         # G_ABANDONED: skipped by ingest, not in events
         assert stats.meta_side_disagreements == 1
 
+    def test_majority_vote_overrides_wrong_seq1(self):
+        """When seq 1 is credited to the wrong team, majority vote across all 20 slots still derives correct sides."""
+        # T2 acts at seq 1 (wrongly credited), but T1 acts at the blue slots
+        # (3, 5, 7, 10, 11) and T2 acts at red slots (2, 4, 8, 9, 12).
+        # Majority vote: T1 has 5 blue votes, T2 has 5 red votes.
+        # T1 also has 1 red vote (seq 1), T2 has 0 blue votes.
+        # So T1: 5 blue vs 1 red → blue. T2: 0 blue vs 5 red → red.
+        events = [
+            {"game_id": "G1", "action": "ban", "champion": "A", "team": "T2", "side": "blue", "meta_side": "red", "seq": 1, "occurredAt": "2026-01-01T00:00:01Z"},
+            {"game_id": "G1", "action": "ban", "champion": "B", "team": "T1", "side": "red", "meta_side": "blue", "seq": 2, "occurredAt": "2026-01-01T00:00:02Z"},
+            {"game_id": "G1", "action": "ban", "champion": "C", "team": "T1", "side": "blue", "meta_side": "blue", "seq": 3, "occurredAt": "2026-01-01T00:00:03Z"},
+            {"game_id": "G1", "action": "ban", "champion": "D", "team": "T2", "side": "red", "meta_side": "red", "seq": 4, "occurredAt": "2026-01-01T00:00:04Z"},
+            {"game_id": "G1", "action": "ban", "champion": "E", "team": "T1", "side": "blue", "meta_side": "blue", "seq": 5, "occurredAt": "2026-01-01T00:00:05Z"},
+            {"game_id": "G1", "action": "ban", "champion": "F", "team": "T2", "side": "red", "meta_side": "red", "seq": 6, "occurredAt": "2026-01-01T00:00:06Z"},
+            {"game_id": "G1", "action": "pick", "champion": "G", "team": "T1", "side": "blue", "meta_side": "blue", "seq": 7, "occurredAt": "2026-01-01T00:00:07Z"},
+            {"game_id": "G1", "action": "pick", "champion": "H", "team": "T2", "side": "red", "meta_side": "red", "seq": 8, "occurredAt": "2026-01-01T00:00:08Z"},
+            {"game_id": "G1", "action": "pick", "champion": "I", "team": "T2", "side": "red", "meta_side": "red", "seq": 9, "occurredAt": "2026-01-01T00:00:09Z"},
+            {"game_id": "G1", "action": "pick", "champion": "J", "team": "T1", "side": "blue", "meta_side": "blue", "seq": 10, "occurredAt": "2026-01-01T00:00:10Z"},
+        ]
+        slotted, stats = assign_slots(events)
+        # T1: blue votes at seq 3,5,7,10 = 4; red votes at seq 2 = 1 → blue
+        # T2: blue votes at seq 1 = 1; red votes at seq 4,6,8,9 = 4 → red
+        t1_events = [e for e in slotted if e["team"] == "T1"]
+        t2_events = [e for e in slotted if e["team"] == "T2"]
+        assert all(e["side"] == "blue" for e in t1_events), "T1 should be derived blue by majority"
+        assert all(e["side"] == "red" for e in t2_events), "T2 should be derived red by majority"
+        # meta_side: T1=blue matches derived blue, T2=red matches derived red → 0 disagreements
+        assert stats.meta_side_disagreements == 0
+
     def test_zero_side_mismatches_with_correct_order(self):
         """With corrected DRAFT_SIDE_ORDER and derived sides, real-style drafts have 0 mismatches."""
         events, _ = _load_all()
@@ -534,3 +600,213 @@ class TestSeqSorting:
         folded = apply_undos(events)
         assert len(folded) == 1
         assert folded[0]["champion"] == "B"
+
+
+class TestLegalPool:
+    """Tests for legal_pool and resolve_champion_games."""
+
+    def test_burned_set_empty_for_game1(self):
+        """Game 1 has no burned champions (no prior games)."""
+        events, _ = _load_all()
+        folded = apply_undos(events)
+        slotted, _ = assign_slots(folded)
+        burned = _burned_champions(slotted, 1, is_bo1=False)
+        assert burned == set()
+
+    def test_burned_set_from_game1_for_game2(self):
+        """Game 2 burned set contains all champions picked in game 1 (both teams)."""
+        events, _ = _load_all()
+        folded = apply_undos(events)
+        slotted, _ = assign_slots(folded)
+        # G1 picks after undo folding: Lee Sin, Thresh, Graves, Jinx, Warwick, Soraka (T1) +
+        #                               Darius, Malphite, Caitlyn, Nautilus (T2)
+        burned = _burned_champions(slotted, 2, is_bo1=False)
+        assert "Lee Sin" in burned
+        assert "Darius" in burned
+        assert "Jinx" in burned
+        assert "Soraka" in burned
+        # Bans should NOT be in burned set
+        assert "Ryze" not in burned  # Ryze is banned in G1, not picked
+
+    def test_burned_empty_for_bo1(self):
+        """Bo1 series has no burned set even with prior games."""
+        events, _ = _load_all()
+        folded = apply_undos(events)
+        slotted, _ = assign_slots(folded)
+        burned = _burned_champions(slotted, 2, is_bo1=True)
+        assert burned == set()
+
+    def test_legal_pool_excludes_burned(self):
+        """Legal pool for game 2 excludes champions burned from game 1."""
+        events, _ = _load_all()
+        folded = apply_undos(events)
+        slotted, _ = assign_slots(folded)
+        roles = _make_minimal_roles()
+        pool = legal_pool(slotted, roles, game_num=2, at_slot=1, is_bo1=False)
+        # Lee Sin was picked in G1 → burned → not in pool
+        assert "Lee Sin" not in pool
+
+    def test_legal_pool_excludes_bans(self):
+        """Legal pool excludes bans from the current game."""
+        events, _ = _load_all()
+        folded = apply_undos(events)
+        slotted, _ = assign_slots(folded)
+        roles = _make_minimal_roles()
+        # K'Sante is banned at slot 1 in G1. At slot 1 (before any bans), it should be in pool.
+        pool1 = legal_pool(slotted, roles, game_num=1, at_slot=1, is_bo1=False)
+        assert "K'Sante" in pool1
+        # At slot 2, K'Sante (slot 1 ban) should be excluded
+        pool2 = legal_pool(slotted, roles, game_num=1, at_slot=2, is_bo1=False)
+        assert "K'Sante" not in pool2
+
+    def test_legal_pool_excludes_picks_so_far(self):
+        """Legal pool excludes picks already made in the current game."""
+        events, _ = _load_all()
+        folded = apply_undos(events)
+        slotted, _ = assign_slots(folded)
+        roles = _make_minimal_roles()
+        # Lee Sin is picked at slot 7 in G1. At slot 8 it should be excluded.
+        pool7 = legal_pool(slotted, roles, game_num=1, at_slot=7, is_bo1=False)
+        assert "Lee Sin" in pool7  # before the pick
+        pool8 = legal_pool(slotted, roles, game_num=1, at_slot=8, is_bo1=False)
+        assert "Lee Sin" not in pool8  # after the pick
+
+    def test_resolve_champion_games_row_count(self):
+        """resolve_champion_games emits exactly 2 × universe_size rows per game."""
+        events, _ = _load_all()
+        folded = apply_undos(events)
+        slotted, _ = assign_slots(folded)
+        kept, _ = check_completeness(slotted)
+        roles = _make_minimal_roles()
+        rows = resolve_champion_games(kept, roles)
+        # Only G1 is complete in SYN-2
+        g1_rows = [r for r in rows if r["game_id"] == "G1"]
+        universe_size = len(roles)
+        # 2 teams × universe_size champions
+        assert len(g1_rows) == 2 * universe_size
+
+    def test_resolve_champion_games_exactly_one_row_per_team_champion(self):
+        """Exactly one row per (game_id, team, champion) combination."""
+        events, _ = _load_all()
+        folded = apply_undos(events)
+        slotted, _ = assign_slots(folded)
+        kept, _ = check_completeness(slotted)
+        roles = _make_minimal_roles()
+        rows = resolve_champion_games(kept, roles)
+        g1_rows = [r for r in rows if r["game_id"] == "G1"]
+        keys = {(r["game_id"], r["team"], r["champion"]) for r in g1_rows}
+        assert len(keys) == len(g1_rows)  # no duplicates
+
+    def test_resolve_champion_games_status_priority(self):
+        """Status priority: burned > banned > taken > denied > skipped."""
+        events, _ = _load_all()
+        folded = apply_undos(events)
+        slotted, _ = assign_slots(folded)
+        kept, _ = check_completeness(slotted)
+        roles = _make_minimal_roles()
+        rows = resolve_champion_games(kept, roles)
+        g1_rows = [r for r in rows if r["game_id"] == "G1"]
+
+        # Check a banned champion (K'Sante banned by T1 at slot 1)
+        ksante_rows = [r for r in g1_rows if r["champion"] == "K'Sante"]
+        assert all(r["status"] == "banned" for r in ksante_rows)
+
+        # Check a taken champion (T1 picked Lee Sin)
+        t1_leesin = [r for r in g1_rows if r["team"] == "T1" and r["champion"] == "Lee Sin"]
+        assert len(t1_leesin) == 1
+        assert t1_leesin[0]["status"] == "taken"
+
+        # Check a denied champion (T1 picked Lee Sin, so T2 should see it as denied)
+        t2_leesin = [r for r in g1_rows if r["team"] == "T2" and r["champion"] == "Lee Sin"]
+        assert len(t2_leesin) == 1
+        assert t2_leesin[0]["status"] == "denied"
+
+    def test_resolve_champion_games_burned_carry_across_games(self):
+        """Burned champions from G1 appear as burned in G2 for both teams."""
+        events, _ = _load_all()
+        folded = apply_undos(events)
+        slotted, _ = assign_slots(folded)
+        # Don't drop incomplete — we need G2 events for burned calculation
+        # But G2 is incomplete, so resolve_champion_games should skip it.
+        # Instead, use SYN-3 which has G3 (game_num=1) and G4 (game_num=2), both complete.
+        events3, _ = _load_all3()
+        folded3 = apply_undos(events3)
+        slotted3, _ = assign_slots(folded3)
+        kept3, _ = check_completeness(slotted3)
+        roles = _make_minimal_roles()
+        rows = resolve_champion_games(kept3, roles)
+
+        # G3 picks: Kalista, K'Sante, Azir, Viktor, Orianna (T3) +
+        #           Syndra, LeBlanc, Ahri, Yasuo, Zed (T4)
+        # In G4, these should be burned for both teams
+        g4_rows = [r for r in rows if r["game_id"] == "G4"]
+        kalista_g4 = [r for r in g4_rows if r["champion"] == "Kalista"]
+        assert all(r["status"] == "burned" for r in kalista_g4)
+
+        # G3 is game_num=1, so no burned set for G3
+        g3_rows = [r for r in rows if r["game_id"] == "G3"]
+        kalista_g3_t3 = [r for r in g3_rows if r["team"] == "T3" and r["champion"] == "Kalista"]
+        assert kalista_g3_t3[0]["status"] == "taken"  # T3 picked Kalista in G3
+
+    def test_burned_champion_never_skipped(self):
+        """A burned champion never appears as 'skipped' — it's always 'burned'."""
+        events, _ = _load_all()
+        folded = apply_undos(events)
+        slotted, _ = assign_slots(folded)
+        kept, _ = check_completeness(slotted)
+        # Use SYN-3 for multi-game: G3 (game_num=1) and G4 (game_num=2)
+        events3, _ = _load_all3()
+        folded3 = apply_undos(events3)
+        slotted3, _ = assign_slots(folded3)
+        kept3, _ = check_completeness(slotted3)
+        roles = _make_minimal_roles()
+        rows = resolve_champion_games(kept3, roles)
+
+        # Kalista was picked in G3 → burned in G4
+        g4_kalista = [r for r in rows if r["game_id"] == "G4" and r["champion"] == "Kalista"]
+        for r in g4_kalista:
+            assert r["status"] == "burned", f"Kalista in G4 should be burned, got {r['status']}"
+            assert r["status"] != "skipped"
+
+    def test_resolve_champion_games_includes_required_fields(self):
+        """Each row includes series_id, game_id, game_num, team, side, patch, champion, status."""
+        events, _ = _load_all()
+        folded = apply_undos(events)
+        slotted, _ = assign_slots(folded)
+        kept, _ = check_completeness(slotted)
+        roles = _make_minimal_roles()
+        rows = resolve_champion_games(kept, roles)
+        required_keys = {"series_id", "game_id", "game_num", "team", "side", "patch", "champion", "status"}
+        for r in rows:
+            assert required_keys.issubset(r.keys()), f"Missing keys: {required_keys - r.keys()}"
+
+    def test_resolve_champion_games_valid_statuses(self):
+        """All statuses are one of: burned, banned, taken, denied, skipped."""
+        events, _ = _load_all()
+        folded = apply_undos(events)
+        slotted, _ = assign_slots(folded)
+        kept, _ = check_completeness(slotted)
+        roles = _make_minimal_roles()
+        rows = resolve_champion_games(kept, roles)
+        valid = {"burned", "banned", "taken", "denied", "skipped"}
+        for r in rows:
+            assert r["status"] in valid, f"Invalid status: {r['status']}"
+
+    def test_burn_carry_for_both_teams(self):
+        """Burned set applies to both teams — picks by either team burn the champion."""
+        events3, _ = _load_all3()
+        folded3 = apply_undos(events3)
+        slotted3, _ = assign_slots(folded3)
+        kept3, _ = check_completeness(slotted3)
+        roles = _make_minimal_roles()
+        rows = resolve_champion_games(kept3, roles)
+
+        # T3 picked Kalista in G3, T4 picked Syndra in G3
+        # In G4, both should be burned for both teams
+        g4_rows = [r for r in rows if r["game_id"] == "G4"]
+        for champ in ["Kalista", "Syndra"]:
+            champ_rows = [r for r in g4_rows if r["champion"] == champ]
+            for r in champ_rows:
+                assert r["status"] == "burned", (
+                    f"{champ} in G4 for {r['team']} should be burned, got {r['status']}"
+                )
