@@ -128,24 +128,51 @@ function signalBadgeHtml(label) {
   return `<span class="badge-signal badge-lead"><span class="signal-dot"></span>LEAD</span>`;
 }
 
-/* ---------- API Helper ---------- */
+/* ---------- API / Static Data Helper ---------- */
 
-async function fetchJson(url) {
+const IS_STATIC = document.documentElement.dataset.static === "1";
+
+function resolveDataUrl(endpoint) {
+  if (!IS_STATIC) return endpoint;
+  if (endpoint === "/teams") return "data/teams.json";
+  if (endpoint === "/self-scout") return "data/self-scout.json";
+  if (endpoint.startsWith("/silence/")) {
+    const teamId = endpoint.slice("/silence/".length);
+    return `data/silence/${teamId}.json`;
+  }
+  return endpoint;
+}
+
+async function fetchJson(endpoint) {
+  const url = resolveDataUrl(endpoint);
   const response = await fetch(url, {
     headers: { Accept: "application/json" },
   });
   let body = null;
+  let parseError = false;
   try {
     body = await response.json();
   } catch {
     body = null;
+    parseError = true;
   }
   if (!response.ok) {
-    const err = new Error(
-      (body && body.detail) || `Request failed with status ${response.status}`
-    );
+    const fallbackDetail =
+      response.status === 404
+        ? "No exported report found for this team."
+        : `Request failed with status ${response.status}`;
+    const err = new Error((body && body.detail) || fallbackDetail);
     err.status = response.status;
     err.detail = (body && body.detail) || err.message;
+    throw err;
+  }
+  if (parseError) {
+    const err = new Error("Expected JSON response.");
+    err.status = IS_STATIC && endpoint.startsWith("/silence/") ? 404 : 500;
+    err.detail =
+      err.status === 404
+        ? "No exported report found for this team."
+        : "Received non-JSON response.";
     throw err;
   }
   return body;

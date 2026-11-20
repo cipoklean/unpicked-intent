@@ -18,13 +18,13 @@ git config core.hooksPath .githooks   # enables the license-boundary pre-push ch
 
 ## Data (never committed)
 
-Raw GRID feeds go in `data/`, all generated artifacts in `derived/` —
-both gitignored. Verify before pushing:
+Raw GRID feeds go in `data/`, all generated artifacts in `derived/`, and
+static site exports in `dist/` — all gitignored. Verify before pushing:
 
 ```bash
 ./scripts/check_data_boundary.sh
 # equivalent manual check:
-git ls-files | grep -nE '(^|/)(data|derived)/|\.(zst|jsonl|parquet|duckdb|db|sqlite3?|csv)$' \
+git ls-files | grep -nE '(^|/)(data|derived|dist)/|\.(zst|jsonl|parquet|duckdb|db|sqlite3?|csv)$' \
   | grep -vE 'static/champion_roles\.csv|tests/fixtures/' && echo "VIOLATION" || echo "clean"
 ```
 
@@ -43,3 +43,12 @@ pytest
 ```
 
 Tests run on synthetic fixtures only — never on feed data.
+
+## Deploy
+
+Export the precomputed Silence Report UI and JSON payloads into `dist/` (gitignored) and deploy to Vercel as a static site:
+
+```bash
+PYTHONPATH=src python -m unpicked_intent.export_static --out dist
+vercel deploy dist --prod
+```

@@ -11,6 +11,7 @@ venv/
 # it is a derived extract and must NOT be committed.
 data/
 derived/
+dist/
 *.zst
 *.jsonl
 *.parquet
