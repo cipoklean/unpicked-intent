@@ -6,6 +6,7 @@
 
 CREATE TABLE IF NOT EXISTS draft_events (
     series_id   VARCHAR NOT NULL,
+    game_id     VARCHAR NOT NULL,          -- unique game identifier from GRID
     game_num    INTEGER NOT NULL,          -- 1-indexed within the series
     slot        INTEGER NOT NULL,          -- order within the draft
     phase       VARCHAR NOT NULL CHECK (phase IN ('ban1','pick1','ban2','pick2')),

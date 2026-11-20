@@ -120,6 +120,7 @@ def run_pipeline(grid_path: str) -> None:
     draft_tuples = [
         (
             ev["series_id"],
+            ev["game_id"],
             ev["game_num"],
             ev["slot"],
             ev["phase"],
@@ -135,7 +136,7 @@ def run_pipeline(grid_path: str) -> None:
     ]
     if draft_tuples:
         con.executemany(
-            "INSERT INTO draft_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO draft_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             draft_tuples,
         )
 

@@ -265,10 +265,10 @@ def run_baseline(grid_path: str | None = None) -> None:
     champion_roles = load()
     baseline_rows = compute_baseline(cg_dicts, de_dicts, champion_roles)
 
-    # Write baseline table
+    # Write baseline table (replace on every run)
     con = duckdb.connect(str(DB_PATH))
     con.execute("""
-        CREATE TABLE IF NOT EXISTS baseline (
+        CREATE OR REPLACE TABLE baseline (
             patch         VARCHAR NOT NULL,
             champion      VARCHAR NOT NULL,
             role          VARCHAR NOT NULL,

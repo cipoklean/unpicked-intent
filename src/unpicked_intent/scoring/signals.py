@@ -253,6 +253,41 @@ def build_evidence_rows(
     return evidence
 
 
+def benjamini_hochberg(p_values: list[float]) -> list[float]:
+    """Compute Benjamini-Hochberg adjusted p-values (q-values).
+
+    Controls the false discovery rate (FDR). For each p-value, the q-value
+    is the minimum FDR at which that test would be called significant.
+
+    Args:
+        p_values: List of raw p-values.
+
+    Returns:
+        List of adjusted p-values (q-values), same length as input.
+    """
+    m = len(p_values)
+    if m == 0:
+        return []
+
+    # Index by original position, sort by p-value
+    indexed = sorted(enumerate(p_values), key=lambda x: x[1])
+
+    q_values = [0.0] * m
+    # Start with the largest p-value
+    prev_q = 1.0
+    for i in range(m - 1, -1, -1):
+        rank = i + 1  # 1-based rank
+        orig_idx, p = indexed[i]
+        q = p * m / rank
+        if q < prev_q:
+            prev_q = q
+        else:
+            prev_q = prev_q
+        q_values[orig_idx] = min(prev_q, 1.0)
+
+    return q_values
+
+
 def compute_left_open(
     evidence_rows: list[dict],
 ) -> list[dict]:
@@ -263,6 +298,7 @@ def compute_left_open(
       - t = number taken
       - expected = sum of per-game pick_rates
       - p_value = P(T ≤ t) under Poisson-binomial
+      - q_value = Benjamini-Hochberg adjusted p-value across all tells
       - fit = player's share of games on that champion
 
     Drop tells with k < MIN_N. Rank by p_value ascending.
@@ -309,6 +345,13 @@ def compute_left_open(
 
     # Rank by p_value ascending
     tells.sort(key=lambda x: x["p_value"])
+
+    # Compute Benjamini-Hochberg q-values
+    p_values = [t["p_value"] for t in tells]
+    q_values = benjamini_hochberg(p_values)
+    for i, t in enumerate(tells):
+        t["q_value"] = round(q_values[i], 8)
+
     return tells
 
 
@@ -452,7 +495,7 @@ def run_signals(grid_path: str) -> None:
     cg_dicts = [dict(zip(cg_columns, row)) for row in cg_rows]
 
     de_rows = con.execute("SELECT * FROM draft_events").fetchall()
-    de_columns = ["series_id", "game_num", "slot", "phase", "side", "team",
+    de_columns = ["series_id", "game_id", "game_num", "slot", "phase", "side", "team",
                    "action", "champion", "patch", "league", "played_at"]
     de_dicts = [dict(zip(de_columns, row)) for row in de_rows]
 
@@ -480,7 +523,7 @@ def run_signals(grid_path: str) -> None:
     con = duckdb.connect(str(DB_PATH))
 
     con.execute("""
-        CREATE TABLE IF NOT EXISTS left_open (
+        CREATE OR REPLACE TABLE left_open (
             team        VARCHAR NOT NULL,
             player_id   VARCHAR NOT NULL,
             role        VARCHAR NOT NULL,
@@ -489,6 +532,7 @@ def run_signals(grid_path: str) -> None:
             t           INTEGER NOT NULL,
             expected    DOUBLE NOT NULL,
             p_value     DOUBLE NOT NULL,
+            q_value     DOUBLE NOT NULL,
             fit         DOUBLE NOT NULL
         )
     """)
@@ -496,16 +540,16 @@ def run_signals(grid_path: str) -> None:
     if left_open_tells:
         tuples = [
             (t["team"], t["player_id"], t["role"], t["champion"],
-             t["k"], t["t"], t["expected"], t["p_value"], t["fit"])
+             t["k"], t["t"], t["expected"], t["p_value"], t["q_value"], t["fit"])
             for t in left_open_tells
         ]
         con.executemany(
-            "INSERT INTO left_open VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO left_open VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             tuples,
         )
 
     con.execute("""
-        CREATE TABLE IF NOT EXISTS early_ban (
+        CREATE OR REPLACE TABLE early_ban (
             team             VARCHAR NOT NULL,
             champion         VARCHAR NOT NULL,
             n_bans           INTEGER NOT NULL,
