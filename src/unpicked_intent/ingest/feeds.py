@@ -70,9 +70,9 @@ def iter_draft_events(feed_path: str, games_csv_path: str = "") -> Iterator[dict
     """Yield normalized draft-action dicts from a series feed file.
 
     Contract per yielded dict:
-        series_id, game_num, slot, phase ('ban1'|'pick1'|'ban2'|'pick2'),
+        series_id, game_id, game_num, slot, phase ('ban1'|'pick1'|'ban2'|'pick2'),
         side ('blue'|'red'), team, action ('ban'|'pick'|'undo-ban'|'undo-pick'),
-        champion, patch, league, played_at
+        champion, patch, league, played_at, seq (optional sequence number)
 
     Undo events are yielded as actions so normalize.py can fold them in
     order — do NOT filter them here.
@@ -81,6 +81,10 @@ def iter_draft_events(feed_path: str, games_csv_path: str = "") -> Iterator[dict
     "occurredAt" and a list "events".  Only events whose type appears in
     ACTION_MAP are emitted.  Patch, game_num, and side are resolved from
     meta/games.csv (path passed as games_csv_path).
+
+    Raises ValueError when a game_id or team_id cannot be found in games.csv.
+    Yields a summary dict keyed by "_skipped_count" at the end with the count
+    of events that were skipped due to missing metadata.
     """
     # Extract series_id from filename
     feed_name = Path(feed_path).name
@@ -91,6 +95,8 @@ def iter_draft_events(feed_path: str, games_csv_path: str = "") -> Iterator[dict
 
     # Load games metadata
     games_meta = _read_games_meta(games_csv_path)
+
+    skipped_count = 0
 
     # Stream the zstd-compressed file line by line (true streaming, no full read)
     with zstd.open(feed_path, "rt", encoding="utf-8") as f:
@@ -114,17 +120,44 @@ def iter_draft_events(feed_path: str, games_csv_path: str = "") -> Iterator[dict
                 champion = ev["target"]["state"]["name"]
                 action = ACTION_MAP[ev_type]
 
-                # Resolve game context from the event's game_id field
-                game_id = ev.get("gameId", "")
-                meta = games_meta.get(game_id, {})
-                side = meta.get("team_ids", {}).get(team_id, "blue")
-                patch = meta.get("patch", "")
-                game_number = meta.get("game_number", 0)
+                # Resolve game context from seriesStateDelta (real GRID shape)
+                ssd = ev.get("seriesStateDelta", {})
+                games_list = ssd.get("games", [])
+                if not games_list:
+                    skipped_count += 1
+                    continue
+                game_id = games_list[0].get("id", "")
+                if not game_id:
+                    skipped_count += 1
+                    continue
+
+                # Extract sequence number from draftActions (may be missing on undos)
+                seq = None
+                draft_actions = games_list[0].get("draftActions", [])
+                if draft_actions:
+                    seq = draft_actions[0].get("sequenceNumber")
+
+                # Look up metadata — raise if game_id not found
+                meta = games_meta.get(game_id)
+                if meta is None:
+                    raise ValueError(
+                        f"game_id '{game_id}' from feed not found in games.csv"
+                    )
+
+                # Look up side — raise if team not found for this game
+                side = meta["team_ids"].get(team_id)
+                if side is None:
+                    raise ValueError(
+                        f"team '{team_id}' not found in games.csv for game_id '{game_id}'"
+                    )
+
+                patch = meta["patch"]
+                game_number = meta["game_number"]
 
                 yield {
                     "series_id": series_id,
-                    "game_num": game_number,
                     "game_id": game_id,
+                    "game_num": game_number,
                     "slot": 0,  # assigned in normalize.py
                     "phase": "",  # assigned in normalize.py
                     "side": side,
@@ -134,4 +167,9 @@ def iter_draft_events(feed_path: str, games_csv_path: str = "") -> Iterator[dict
                     "patch": patch,
                     "league": "",  # not in games.csv; could come from feed metadata
                     "played_at": envelope.get("occurredAt", ""),
+                    "seq": seq,
                 }
+
+    # Yield skip count as a special summary event
+    if skipped_count > 0:
+        yield {"_skipped_count": skipped_count}

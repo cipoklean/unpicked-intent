@@ -91,12 +91,22 @@ DRAFT_ORDER = [
 ]
 
 
+def _sort_key(ev: dict):
+    """Sort key: (seq or infinity, occurredAt) so events with seq come first."""
+    seq = ev.get("seq")
+    if seq is None:
+        seq = float("inf")
+    return (seq, ev.get("occurredAt", ""))
+
+
 def apply_undos(events: list[dict]) -> list[dict]:
     """Remove (action, champion, team, game) pairs matched by later undos.
 
     An undo event targets the most recent matching (action, champion, team,
     game_num) entry that appears before it in the stream. Both the original
     action and the undo are removed from the result.
+
+    Events within each game are ordered by (seq, occurredAt) where seq exists.
 
     Returns the event list with undos folded in.
     """
@@ -107,6 +117,8 @@ def apply_undos(events: list[dict]) -> list[dict]:
 
     result = []
     for game_num, game_events in by_game.items():
+        # Sort by (seq, occurredAt) — seq from GRID draftActions ensures correct order
+        game_events = sorted(game_events, key=_sort_key)
         kept: list[dict] = []
         for ev in game_events:
             action = ev["action"]
@@ -148,7 +160,7 @@ def assign_slots(events: list[dict]) -> list[dict]:
 
     result = []
     for game_num in sorted(by_game.keys()):
-        game_events = by_game[game_num]
+        game_events = sorted(by_game[game_num], key=_sort_key)
         slot_ptr = 0  # index into DRAFT_ORDER
         for ev in game_events:
             action = ev["action"]

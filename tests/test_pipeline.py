@@ -1,5 +1,6 @@
 """Tests for ingest and pipeline stages using synthetic fixtures."""
 
+import pytest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -46,9 +47,97 @@ class TestIterDraftEvents:
         """Patch, game_num, and side come from games.csv."""
         events = _load_all()
         for ev in events:
+            if "_skipped_count" in ev:
+                continue
             assert ev["patch"] == "16.20"
             assert ev["game_num"] in (1, 2)
             assert ev["side"] in ("blue", "red")
+
+    def test_resolves_game_id_from_series_state_delta(self):
+        """game_id comes from seriesStateDelta.games[0].id, not a flat gameId key."""
+        events = _load_all()
+        for ev in events:
+            if "_skipped_count" in ev:
+                continue
+            assert ev["game_id"] in ("G1", "G2")
+
+    def test_seq_field_present(self):
+        """seq field is present; non-undo events have int seq, undos may have None."""
+        events = _load_all()
+        for ev in events:
+            if "_skipped_count" in ev:
+                continue
+            assert "seq" in ev
+            if ev["action"] not in ("undo-ban", "undo-pick"):
+                # Non-undo events should have a sequence number
+                assert ev["seq"] is not None
+                assert isinstance(ev["seq"], int)
+
+    def test_raises_on_missing_game_id(self):
+        """Raises ValueError when game_id from feed is not in games.csv."""
+        import tempfile
+        import json
+        import zstandard as zstd
+        from pathlib import Path
+
+        # Create a feed with a game_id not in games.csv
+        envelope = {
+            "occurredAt": "2026-11-01T10:00:00Z",
+            "events": [
+                {
+                    "type": "team-banned-character",
+                    "actor": {"id": "T1"},
+                    "target": {"state": {"name": "Garen"}},
+                    "seriesStateDelta": {"games": [{"id": "UNKNOWN-GAME", "draftActions": [{"sequenceNumber": 1}]}]},
+                }
+            ],
+        }
+        tmp_dir = Path(tempfile.mkdtemp())
+        tmp_feed = tmp_dir / "events_TEST-1_grid.jsonl.zst"
+        jsonl_text = json.dumps(envelope) + "\n"
+        compressed = zstd.compress(jsonl_text.encode("utf-8"))
+        tmp_feed.write_bytes(compressed)
+
+        try:
+            with pytest.raises(ValueError, match="UNKNOWN-GAME"):
+                list(iter_draft_events(str(tmp_feed), GAMES_CSV))
+        finally:
+            tmp_feed.unlink(missing_ok=True)
+            if tmp_dir.exists():
+                tmp_dir.rmdir()
+
+    def test_raises_on_missing_team(self):
+        """Raises ValueError when team is not in games.csv for the game."""
+        import tempfile
+        import json
+        import zstandard as zstd
+        from pathlib import Path
+
+        # Create a feed with a team not in games.csv
+        envelope = {
+            "occurredAt": "2026-11-01T10:00:00Z",
+            "events": [
+                {
+                    "type": "team-banned-character",
+                    "actor": {"id": "UNKNOWN-TEAM"},
+                    "target": {"state": {"name": "Garen"}},
+                    "seriesStateDelta": {"games": [{"id": "G1", "draftActions": [{"sequenceNumber": 1}]}]},
+                }
+            ],
+        }
+        tmp_dir = Path(tempfile.mkdtemp())
+        tmp_feed = tmp_dir / "events_TEST-2_grid.jsonl.zst"
+        jsonl_text = json.dumps(envelope) + "\n"
+        compressed = zstd.compress(jsonl_text.encode("utf-8"))
+        tmp_feed.write_bytes(compressed)
+
+        try:
+            with pytest.raises(ValueError, match="UNKNOWN-TEAM"):
+                list(iter_draft_events(str(tmp_feed), GAMES_CSV))
+        finally:
+            tmp_feed.unlink(missing_ok=True)
+            if tmp_dir.exists():
+                tmp_dir.rmdir()
 
     def test_two_games(self):
         """Feed contains events for two games."""
@@ -101,6 +190,35 @@ class TestIterDraftEvents:
         assert len(read_called) == 0, (
             "read() was called on the stream — the file should be iterated line by line"
         )
+
+
+class TestSeqSorting:
+    """Tests for seq-based event ordering in normalize."""
+
+    def test_sorts_by_seq_not_file_order(self):
+        """Events are sorted by (seq, occurredAt), not file order."""
+        # Create events out of file order but with correct seq numbers
+        events = [
+            {"game_num": 1, "action": "ban", "champion": "B", "team": "T2", "side": "red", "seq": 2, "occurredAt": "2026-01-01T00:00:02Z"},
+            {"game_num": 1, "action": "ban", "champion": "A", "team": "T1", "side": "blue", "seq": 1, "occurredAt": "2026-01-01T00:00:01Z"},
+            {"game_num": 1, "action": "pick", "champion": "C", "team": "T1", "side": "blue", "seq": 3, "occurredAt": "2026-01-01T00:00:03Z"},
+        ]
+        folded = apply_undos(events)
+        # After sorting by seq, champion A (seq=1) should come before B (seq=2)
+        actions = [e["champion"] for e in folded]
+        assert actions == ["A", "B", "C"]
+
+    def test_undos_with_no_seq_sorted_after_seq_events(self):
+        """Undo events without seq are sorted after events with seq."""
+        events = [
+            {"game_num": 1, "action": "ban", "champion": "A", "team": "T1", "side": "blue", "seq": 1, "occurredAt": "2026-01-01T00:00:01Z"},
+            {"game_num": 1, "action": "undo-ban", "champion": "A", "team": "T1", "side": "blue", "seq": None, "occurredAt": "2026-01-01T00:00:02Z"},
+            {"game_num": 1, "action": "ban", "champion": "B", "team": "T2", "side": "red", "seq": 2, "occurredAt": "2026-01-01T00:00:03Z"},
+        ]
+        folded = apply_undos(events)
+        # Undo should fold the ban on A, leaving only B
+        assert len(folded) == 1
+        assert folded[0]["champion"] == "B"
 
 
 class TestApplyUndos:
