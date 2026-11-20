@@ -860,13 +860,72 @@ class TestInferPlayers:
         """Flex player's role is the argmax (first most common role)."""
         from unpicked_intent.roles.infer_players import infer
 
-        # 2 top, 1 mid, 1 jungle → top wins with 50% share, still flex
+        # 2 top, 1 mid, 1 jungle → top wins with 50% share, not flex (threshold is 0.5)
         history = {"P1": ["Aatrox", "Darius", "Azir", "Graves"]}
         priors = _load_champion_roles()
         result = infer(history, priors)
         assert result["P1"]["role"] == "top"
         assert result["P1"]["share"] == 0.5
-        assert result["P1"]["flex"] is True
+        assert result["P1"]["flex"] is False
+
+    def test_flex_threshold_constant(self):
+        """FLEX_THRESHOLD is 0.5 (flex = share < 0.5)."""
+        from unpicked_intent.roles.infer_players import FLEX_THRESHOLD, infer
+
+        assert FLEX_THRESHOLD == 0.5
+
+        # 1 top, 1 mid → 50% share, not flex (share is not < 0.5)
+        history = {"P1": ["Aatrox", "Azir"]}
+        priors = _load_champion_roles()
+        result = infer(history, priors)
+        assert result["P1"]["flex"] is False
+
+        # 1 top, 2 mid → 66.7% mid, not flex
+        history2 = {"P1": ["Aatrox", "Azir", "Malphite"]}
+        result2 = infer(history2, priors)
+        assert result2["P1"]["flex"] is False
+
+        # 3 top, 1 mid → 75% top, not flex
+        history3 = {"P1": ["Aatrox", "Darius", "Gnar", "Azir"]}
+        result3 = infer(history3, priors)
+        assert result3["P1"]["flex"] is False
+
+        # 1 each of 4 roles → 25% share, flex (share < 0.5)
+        history4 = {"P1": ["Aatrox", "Azir", "Graves", "Jinx"]}
+        result4 = infer(history4, priors)
+        assert result4["P1"]["flex"] is True
+        assert result4["P1"]["share"] == 0.25
+
+    def test_derived_path_next_to_pyproject(self):
+        """DERIVED resolves to the repo root's derived/ folder, next to pyproject.toml."""
+        from unpicked_intent.roles.infer_players import DERIVED
+
+        assert DERIVED.name == "derived"
+        # The parent of derived/ is the repo root, which contains pyproject.toml
+        pyproject = DERIVED.parent / "pyproject.toml"
+        assert pyproject.is_file(), f"pyproject.toml not found at {pyproject}"
+
+    def test_build_champion_history_ignores_valorant(self):
+        """build_champion_history() skips rows where title != 'lol'."""
+        from unpicked_intent.roles.infer_players import build_champion_history
+
+        history = build_champion_history(ROSTERS_CSV)
+        # P_VAL is a Valorant player in the fixture; should not appear
+        assert "P_VAL" not in history
+
+    def test_map_team_picks_ignores_valorant(self):
+        """map_team_picks() skips Valorant rows in rosters."""
+        from unpicked_intent.roles.infer_players import map_team_picks
+
+        events, _ = _load_all()
+        folded = apply_undos(events)
+        slotted, _ = assign_slots(folded)
+        kept, _ = check_completeness(slotted)
+
+        mapped = map_team_picks(kept, ROSTERS_CSV)
+        # No Valorant player should appear in the mapped picks
+        for m in mapped:
+            assert m["player_id"] != "P_VAL"
 
     def test_apply_overrides_changes_role(self):
         """apply_overrides() replaces the inferred role when the file exists."""

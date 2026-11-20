@@ -17,11 +17,11 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-DERIVED = Path(__file__).resolve().parents[2] / "derived"
+DERIVED = Path(__file__).resolve().parents[3] / "derived"
 OVERRIDES_PATH = DERIVED / "player_role_overrides.csv"
 OUTPUT_PATH = DERIVED / "player_roles.csv"
 
-FLEX_THRESHOLD = 0.7
+FLEX_THRESHOLD = 0.5
 
 
 def infer(
@@ -119,7 +119,7 @@ def build_champion_history(
     history: dict[str, list[str]] = defaultdict(list)
     with open(rosters_path, encoding="utf-8") as f:
         for row in csv.DictReader(f):
-            if row.get("participation_status") == "active":
+            if row.get("title") == "lol" and row.get("participation_status") == "active":
                 history[row["player_id"]].append(row["character_name"])
     return dict(history)
 
@@ -146,7 +146,7 @@ def map_team_picks(
     roster_lookup: dict[tuple[str, str, str], dict] = {}
     with open(rosters_path, encoding="utf-8") as f:
         for row in csv.DictReader(f):
-            if row.get("participation_status") == "active":
+            if row.get("title") == "lol" and row.get("participation_status") == "active":
                 key = (row["game_id"], row["team_id"], row["character_name"])
                 roster_lookup[key] = {
                     "player_id": row["player_id"],
