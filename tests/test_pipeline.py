@@ -1290,3 +1290,68 @@ class TestBaseline:
         assert DERIVED.name == "derived"
         pyproject = DERIVED.parent / "pyproject.toml"
         assert pyproject.is_file(), f"pyproject.toml not found at {pyproject}"
+
+    def test_build_then_baseline_end_to_end(self):
+        """Run build then run_baseline on synthetic fixtures through real DuckDB.
+
+        This is the path that crashed with KeyError 'patch' because champion_game
+        has no patch column — must be joined from draft_events.
+        """
+        import tempfile
+        import shutil
+        from unpicked_intent.pipeline.build import run_pipeline
+        from unpicked_intent.scoring.baseline import run_baseline
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = Path(tmpdir) / "grid"
+            grid.mkdir()
+            data_dir = grid / "data"
+            data_dir.mkdir()
+            meta_dir = grid / "meta"
+            meta_dir.mkdir()
+
+            # Copy feed files and games.csv
+            shutil.copy(FIXTURES / "events_SYN-2_grid.jsonl.zst", data_dir)
+            shutil.copy(FIXTURES / "events_SYN-3_grid.jsonl.zst", data_dir)
+            shutil.copy(FIXTURES / "games.csv", meta_dir)
+
+            # Temporarily override DERIVED and DB_PATH in both modules
+            import unpicked_intent.pipeline.build as build_mod
+            import unpicked_intent.scoring.baseline as baseline_mod
+
+            orig_build_derived = build_mod.DERIVED
+            orig_build_db = build_mod.DB_PATH
+            orig_baseline_derived = baseline_mod.DERIVED
+            orig_baseline_db = baseline_mod.DB_PATH
+
+            try:
+                shared_derived = Path(tmpdir) / "derived"
+                shared_db = shared_derived / "unpicked.duckdb"
+
+                build_mod.DERIVED = shared_derived
+                build_mod.DB_PATH = shared_db
+                baseline_mod.DERIVED = shared_derived
+                baseline_mod.DB_PATH = shared_db
+
+                # Step 1: run build pipeline
+                run_pipeline(str(grid))
+                assert shared_db.exists(), "DuckDB not created by build"
+
+                # Step 2: run baseline — this is where KeyError 'patch' occurred
+                run_baseline()
+
+                # Verify baseline table was written
+                import duckdb
+                con = duckdb.connect(str(shared_db))
+                bl_count = con.execute("SELECT COUNT(*) FROM baseline").fetchone()[0]
+                con.close()
+
+                # All 3 synthetic games use patch 16.20, so 1 patch window × 173 champions = 173
+                assert bl_count == 173, f"Expected 173 baseline rows, got {bl_count}"
+            finally:
+                build_mod.DERIVED = orig_build_derived
+                build_mod.DB_PATH = orig_build_db
+                baseline_mod.DERIVED = orig_baseline_derived
+                baseline_mod.DB_PATH = orig_baseline_db
+                if shared_db.exists():
+                    shared_db.unlink()

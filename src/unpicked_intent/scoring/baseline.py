@@ -220,9 +220,16 @@ def run_baseline(grid_path: str | None = None) -> None:
 
     con = duckdb.connect(str(DB_PATH))
 
-    # Read champion_game and draft_events
-    cg_rows = con.execute("SELECT * FROM champion_game").fetchall()
-    cg_columns = ["series_id", "game_num", "team", "champion", "resolution"]
+    # Read champion_game joined with draft_events to get patch.
+    # champion_game has no patch column; patch comes from draft_events via (series_id, game_num).
+    cg_rows = con.execute("""
+        SELECT cg.series_id, cg.game_num, cg.team, cg.champion, cg.resolution,
+               de.patch
+        FROM champion_game cg
+        JOIN (SELECT DISTINCT series_id, game_num, patch FROM draft_events) de
+          ON cg.series_id = de.series_id AND cg.game_num = de.game_num
+    """).fetchall()
+    cg_columns = ["series_id", "game_num", "team", "champion", "resolution", "patch"]
     cg_dicts = [dict(zip(cg_columns, row)) for row in cg_rows]
 
     de_rows = con.execute("SELECT * FROM draft_events").fetchall()
@@ -261,7 +268,10 @@ def run_baseline(grid_path: str | None = None) -> None:
             )
             for r in baseline_rows
         ]
-        con.execute("INSERT INTO baseline VALUES ?", [tuples])
+        con.executemany(
+            "INSERT INTO baseline VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            tuples,
+        )
 
     con.close()
 

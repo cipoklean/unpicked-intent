@@ -46,11 +46,16 @@ def run_pipeline(grid_path: str) -> None:
     grid = Path(grid_path)
     games_csv = str(grid / "meta" / "games.csv")
 
-    # Find all feed files
-    feed_pattern = str(grid / "data" / "events_*_grid.jsonl.zst")
-    feed_files = sorted(glob.glob(feed_pattern))
+    # Find all feed files — GRID starter repo keeps them in lol/, fall back to data/
+    feed_files: list[str] = []
+    for subdir in ("lol", "data"):
+        feed_pattern = str(grid / subdir / "events_*_grid.jsonl.zst")
+        feed_files = sorted(glob.glob(feed_pattern))
+        if feed_files:
+            print(f"Found feeds in {subdir}/")
+            break
     if not feed_files:
-        print(f"No feed files found matching {feed_pattern}")
+        print(f"No feed files found in {grid}/lol/ or {grid}/data/")
         sys.exit(1)
 
     print(f"Found {len(feed_files)} feed files")
