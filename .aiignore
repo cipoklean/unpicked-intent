@@ -1,0 +1,7 @@
+# Junie/AI indexing exclusions — mirrors the license boundary.
+# Feed data and derived artifacts never enter agent context.
+data/
+derived/
+*.zst
+*.parquet
+*.duckdb
