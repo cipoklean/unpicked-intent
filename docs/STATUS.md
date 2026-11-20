@@ -24,10 +24,10 @@ Newest entries at the bottom. Every agent appends one entry per finished task.
 - **2026-11-20 · Junie** · Completed `static/champion_roles.csv` (173 champions). Hark checked it against Riot's list and pro usage; fixed Maokai/Zyra → jungle, Elise → support, Vladimir → top, Nunu → "Nunu & Willump".
 - **2026-11-20 · Junie** · Implemented `ingest/feeds.py` (true zstd streaming) and `pipeline/normalize.py` (undo folding, slots, completeness drop, game flags); 20 tests pass.
 - **2026-11-20 · Hark** · Ran ingest on real data: game id came out empty and side defaulted to blue (wrong field). Fix prompt sent to Junie (read the game id from `seriesStateDelta`, order by `sequenceNumber`, never default side).
+- **2026-11-20 · Devin** · Added `.github/workflows/ci.yml`: pytest + `scripts/check_data_boundary.sh` on every push and PR, Python 3.11 via uv (`uv sync --locked --extra dev`).
 
 ## Next up
 1. Junie: game-id fix above → Hark reruns the full-dataset check against the expected totals.
 2. Role inference (player → role, generated into `derived/`, not committed).
 3. Legal-pool reconstruction (Hard Fearless).
-4. Devin: CI (GitHub Actions running pytest + `scripts/check_data_boundary.sh`) when ready.
-5. David: register on Devpost (trial codes arrive within 5 business days); start `docs/ai-workflow.md` for the $1k bonus.
+4. David: register on Devpost (trial codes arrive within 5 business days); start `docs/ai-workflow.md` for the $1k bonus.
