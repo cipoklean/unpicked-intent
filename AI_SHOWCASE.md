@@ -92,5 +92,6 @@ Junie implemented; decisions that change what the tool *claims* stayed with me:
 | 2026-11-20 | 5df6d02 | Signals: left-open (Poisson-binomial) + early-ban | 110 |
 | 2026-11-20 | a1e543a | game_id, idempotent tables, BH q-values (#11–12) | 116 |
 | 2026-11-20 | 34a80e0 | Explicit-column reads (#13) | 116 |
+| 2026-11-20 | 19d7651 | Non-vacuous E2E test, `names` table, read-only scouting API | 127 |
 
 *Next: scouting API, UI, video. Screenshots of Junie sessions in PyCharm go here.*
