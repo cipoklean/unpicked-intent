@@ -18,3 +18,5 @@ the shared memory.** Read both before doing anything.
 4. `BUILD.md` is the spec; locked decisions there aren't reopened without David.
 5. **When you finish a task, append one entry to `docs/STATUS.md`** (date, agent, what changed, what's next). That's how the others find out.
 6. Keep `.idea/` and `.junie/` committed (hackathon evidence of JetBrains use).
+7. **Changed a dependency in `pyproject.toml`? Run `uv lock` and commit `uv.lock` in the same commit.** CI runs `uv sync --locked` and fails on a stale lock.
+8. Pull before you start and before you push. Three agents push to `master`.
