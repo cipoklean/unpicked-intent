@@ -494,17 +494,26 @@ def run_signals(grid_path: str) -> None:
     cg_columns = ["series_id", "game_num", "team", "champion", "resolution", "patch"]
     cg_dicts = [dict(zip(cg_columns, row)) for row in cg_rows]
 
-    de_rows = con.execute("SELECT * FROM draft_events").fetchall()
+    de_rows = con.execute(
+        "SELECT series_id, game_id, game_num, slot, phase, side, team, "
+        "action, champion, patch, league, played_at FROM draft_events"
+    ).fetchall()
     de_columns = ["series_id", "game_id", "game_num", "slot", "phase", "side", "team",
                    "action", "champion", "patch", "league", "played_at"]
     de_dicts = [dict(zip(de_columns, row)) for row in de_rows]
 
-    gf_rows = con.execute("SELECT * FROM game_flags").fetchall()
+    gf_rows = con.execute(
+        "SELECT series_id, game_num, n_picks, n_bans, "
+        "is_complete, is_bo1, fearless_status FROM game_flags"
+    ).fetchall()
     gf_columns = ["series_id", "game_num", "n_picks", "n_bans",
                    "is_complete", "is_bo1", "fearless_status"]
     gf_dicts = [dict(zip(gf_columns, row)) for row in gf_rows]
 
-    bl_rows = con.execute("SELECT * FROM baseline").fetchall()
+    bl_rows = con.execute(
+        "SELECT patch, champion, role, taken, skipped, pick_rate, "
+        "presence, meta_relevant, mean_ban_slot, window_start, window_games FROM baseline"
+    ).fetchall()
     bl_columns = ["patch", "champion", "role", "taken", "skipped", "pick_rate",
                    "presence", "meta_relevant", "mean_ban_slot", "window_start", "window_games"]
     bl_dicts = [dict(zip(bl_columns, row)) for row in bl_rows]

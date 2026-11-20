@@ -255,8 +255,11 @@ def run_baseline(grid_path: str | None = None) -> None:
     cg_columns = ["series_id", "game_num", "team", "champion", "resolution", "patch"]
     cg_dicts = [dict(zip(cg_columns, row)) for row in cg_rows]
 
-    de_rows = con.execute("SELECT * FROM draft_events").fetchall()
-    de_columns = ["series_id", "game_num", "slot", "phase", "side", "team",
+    de_rows = con.execute(
+        "SELECT series_id, game_id, game_num, slot, phase, side, team, "
+        "action, champion, patch, league, played_at FROM draft_events"
+    ).fetchall()
+    de_columns = ["series_id", "game_id", "game_num", "slot", "phase", "side", "team",
                    "action", "champion", "patch", "league", "played_at"]
     de_dicts = [dict(zip(de_columns, row)) for row in de_rows]
 

@@ -2139,6 +2139,33 @@ class TestSignals:
                 lo_count = con.execute("SELECT COUNT(*) FROM left_open").fetchone()[0]
                 eb_count = con.execute("SELECT COUNT(*) FROM early_ban").fetchone()[0]
 
+                # Assert draft_events action column is correctly read.
+                # This is the regression symptom: when draft_events columns were
+                # misaligned (SELECT * zipped into old 11-name list), action held
+                # team values instead of "ban"/"pick", so no bans were found.
+                actions = con.execute(
+                    "SELECT DISTINCT action FROM draft_events ORDER BY action"
+                ).fetchall()
+                assert set(r[0] for r in actions) == {"ban", "pick"}, (
+                    f"draft_events action should be ban/pick, got {actions} — "
+                    "likely column misalignment"
+                )
+
+                # Assert baseline was computed (has rows). With the column
+                # misalignment bug, mean_ban_slot was NULL for every row because
+                # no bans were found. With small synthetic data, mean_ban_slot
+                # may still be NULL (MIN_BANS=10), but the baseline table should
+                # have rows with valid pick_rate and presence.
+                bl_count = con.execute("SELECT COUNT(*) FROM baseline").fetchone()[0]
+                assert bl_count > 0, "baseline should have rows"
+
+                bl_with_pick_rate = con.execute(
+                    "SELECT COUNT(*) FROM baseline WHERE pick_rate > 0"
+                ).fetchone()[0]
+                assert bl_with_pick_rate > 0, (
+                    "baseline has no pick_rate > 0 — likely draft_events column misalignment"
+                )
+
                 con.close()
 
                 # We expect some left_open rows now that game_id is in draft_events
@@ -2150,9 +2177,7 @@ class TestSignals:
                 # so presence should be high enough
                 # left_open needs k >= 4 (MIN_N) for a (team, player, champion) group
                 # P1 on T1 plays Aatrox in 4 games → k=4 if all qualify
-                # We just verify the pipeline runs without error and tables exist
                 assert lo_count >= 0, "left_open should exist"
-                assert eb_count >= 0, "early_ban should exist"
 
             finally:
                 build_mod.DERIVED = orig_build_derived
