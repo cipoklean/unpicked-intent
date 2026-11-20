@@ -31,3 +31,5 @@ derived/
 
 # NOTE: .idea/ and .junie/ are committed ON PURPOSE
 # (hackathon rules encourage them as tooling evidence).
+
+.idea/workspace.xml

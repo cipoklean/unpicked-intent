@@ -31,11 +31,10 @@ git ls-files | grep -nE '(^|/)(data|derived)/|\.(zst|jsonl|parquet|duckdb|db|sql
 Rule of thumb: **could this file exist without the feed?** If not, it
 doesn't get committed.
 
-`static/champion_roles.csv` is the one committed CSV: a **stub** — a
-hand-maintained champion→role table sourced from game knowledge (not
-computed from GRID data). Extend it to the full roster as needed; keep
-it plain two-column CSV (no comment lines — `csv.DictReader` and
-DuckDB `read_csv` don't skip them).
+`static/champion_roles.csv` is the one committed CSV: a hand-maintained
+champion→role table with all 173 champions, sourced from game knowledge
+(not computed from GRID data). It is a plain two-column CSV — no comment
+lines, as `csv.DictReader` and DuckDB `read_csv` do not skip them.
 
 ## Tests
 
