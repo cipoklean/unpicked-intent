@@ -21,73 +21,67 @@ Order of operations (each is load-bearing):
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 
-# Standard pro draft order (20 slots total).
-# Each tuple: (slot, phase, side)
-# ban1: slots 1-2 (blue, red)
-# pick1: slots 3-4 (blue, red)
-# ban2: slots 5-6 (blue, red)
-# pick2: slots 7-10 (blue, red, blue, red)
-# ban1 again for round 2 bans: slots 11-12 (blue, red)
-# pick2 continued: slots 13-20
-#
-# Standard LoL pro draft order (simplified):
-# Phase 1:
-#   Ban1: Blue(1), Red(2)
-#   Pick1: Blue(1), Red(1), Red(2)  [slots 3,4,5]
-#   Ban2: Blue(3), Red(3)           [slots 6,7]
-#   Pick2: Blue(2), Blue(3), Red(3) [slots 8,9,10]
-# Phase 2:
-#   Ban1: Blue(5), Red(5)           [slots 11,12]
-#   Pick1: Blue(4), Red(4), Red(5)  [slots 13,14,15]
-#   Ban2: Blue(7), Red(7)           [slots 16,17]
-#   Pick2: Blue(5), Red(6)          [slots 18,19]
-# Phase 3:
-#   Ban1: Blue(9), Red(9)           [slots 20,21]
-#   Pick1: Blue(6), Red(7)          [slots 22,23]
-#   Ban2: Blue(10), Red(10)         [slots 24,25]
-#   Pick2: (none remaining)
-#
-# Actually, let's use the simpler canonical slot ordering:
-# 20 action slots alternating blue/red, grouped by phase.
 
-DRAFT_ORDER = [
-    # Phase: ban1 (round 1 bans)
-    (1, "ban1", "blue"),
-    (2, "ban1", "red"),
-    # Phase: pick1 (round 1 picks)
-    (3, "pick1", "blue"),
-    (4, "pick1", "red"),
-    (5, "pick1", "red"),
-    # Phase: ban2 (round 2 bans)
-    (6, "ban2", "blue"),
-    (7, "ban2", "red"),
-    # Phase: pick2 (round 2 picks)
-    (8, "pick2", "blue"),
-    (9, "pick2", "blue"),
-    (10, "pick2", "red"),
-    # Phase: ban1 (round 3 bans)
-    (11, "ban1", "blue"),
-    (12, "ban1", "red"),
-    # Phase: pick1 (round 3 picks)
-    (13, "pick1", "blue"),
-    (14, "pick1", "red"),
-    (15, "pick1", "red"),
-    # Phase: ban2 (round 4 bans)
-    (16, "ban2", "blue"),
-    (17, "ban2", "red"),
-    # Phase: pick2 (round 4 picks)
-    (18, "pick2", "blue"),
-    (19, "pick2", "red"),
-    # Phase: ban1 (round 5 bans)
-    (20, "ban1", "blue"),
-    (21, "ban1", "red"),
-    # Phase: pick1 (round 5 picks)
-    (22, "pick1", "blue"),
-    (23, "pick1", "red"),
-    # Phase: ban2 (round 6 bans)
-    (24, "ban2", "blue"),
-    (25, "ban2", "red"),
+@dataclass
+class NormalizeStats:
+    """Summary statistics returned by assign_slots.
+
+    Attributes:
+        side_mismatches: Number of events whose acting team's side did not
+            match the standard pro draft order for that slot.
+    """
+    side_mismatches: int = 0
+
+
+def _phase_from_seq(seq: int) -> str:
+    """Map GRID sequenceNumber (1-20) to phase name.
+
+    GRID's sequenceNumber is the draft slot:
+        1-6  → ban1 (3 rounds of bans, 2 per round)
+        7-12 → pick1 (3 picks per team in round 1)
+        13-16 → ban2 (2 rounds of bans)
+        17-20 → pick2 (remaining picks)
+    """
+    if 1 <= seq <= 6:
+        return "ban1"
+    if 7 <= seq <= 12:
+        return "pick1"
+    if 13 <= seq <= 16:
+        return "ban2"
+    if 17 <= seq <= 20:
+        return "pick2"
+    return "unknown"
+
+
+# Standard pro draft side order for slots 1-20.
+# Used to verify the acting team's side matches expectations.
+DRAFT_SIDE_ORDER = [
+    # ban1: slots 1-6
+    "blue",  # 1
+    "red",   # 2
+    "blue",  # 3
+    "red",   # 4
+    "blue",  # 5
+    "red",   # 6
+    # pick1: slots 7-12
+    "blue",  # 7
+    "red",   # 8
+    "red",   # 9
+    "blue",  # 10
+    "blue",  # 11
+    "red",   # 12
+    # ban2: slots 13-16
+    "blue",  # 13
+    "red",   # 14
+    "blue",  # 15
+    "red",   # 16
+    # pick2: slots 17-20
+    "blue",  # 17
+    "red",   # 18
+    "red",   # 19
+    "blue",  # 20
 ]
 
 
@@ -102,37 +96,41 @@ def _sort_key(ev: dict):
 def apply_undos(events: list[dict]) -> list[dict]:
     """Remove (action, champion, team, game) pairs matched by later undos.
 
-    An undo event targets the most recent matching (action, champion, team,
-    game_num) entry that appears before it in the stream. Both the original
-    action and the undo are removed from the result.
+    An undo event targets the most recent earlier action in the same game
+    with the same seq.  If seq is missing on the undo, falls back to
+    matching (champion, team).
 
     Events within each game are ordered by (seq, occurredAt) where seq exists.
 
     Returns the event list with undos folded in.
     """
-    # Group events by game
+    # Group events by game_id (not game_num — game_num repeats across series)
     by_game = defaultdict(list)
     for ev in events:
-        by_game[ev["game_num"]].append(ev)
+        by_game[ev["game_id"]].append(ev)
 
     result = []
-    for game_num, game_events in by_game.items():
+    for game_id, game_events in by_game.items():
         # Sort by (seq, occurredAt) — seq from GRID draftActions ensures correct order
         game_events = sorted(game_events, key=_sort_key)
         kept: list[dict] = []
         for ev in game_events:
             action = ev["action"]
             if action in ("undo-ban", "undo-pick"):
-                # Find the most recent matching action to remove
+                # Find the action to remove: prefer matching by seq, fallback to champion+team
                 original_action = "ban" if action == "undo-ban" else "pick"
+                undo_seq = ev.get("seq")
                 match_idx = None
                 for i in range(len(kept) - 1, -1, -1):
                     k = kept[i]
-                    if (
-                        k["action"] == original_action
-                        and k["champion"] == ev["champion"]
-                        and k["team"] == ev["team"]
-                    ):
+                    if k["action"] != original_action or k["team"] != ev["team"]:
+                        continue
+                    # Prefer seq-based matching: if undo has seq, match by seq
+                    if undo_seq is not None and k.get("seq") == undo_seq:
+                        match_idx = i
+                        break
+                    # Fallback: if undo has no seq, match by champion
+                    if undo_seq is None and k["champion"] == ev["champion"]:
                         match_idx = i
                         break
                 if match_idx is not None:
@@ -145,52 +143,52 @@ def apply_undos(events: list[dict]) -> list[dict]:
     return result
 
 
-def assign_slots(events: list[dict]) -> list[dict]:
-    """Assign slot and phase to each event using standard pro draft order.
+def assign_slots(events: list[dict]) -> tuple[list[dict], NormalizeStats]:
+    """Assign slot and phase to each event using GRID sequenceNumber.
 
-    Events must be grouped by game_num and in chronological order within
-    each game.  Non-undo events (ban/pick) are assigned the next available
-    draft slot matching their side.  The DRAFT_ORDER template is walked
-    forward: when an event's side matches the current template entry, that
-    slot is consumed; when it doesn't, the template entry is skipped.
+    GRID's sequenceNumber is the draft slot (1-20).  An undo carries the
+    same seq as the action it undoes.  Slot = seq, phase = _phase_from_seq(seq).
+
+    Also checks that the acting team's side matches the standard pro draft
+    order for that slot and counts mismatches.
+
+    Returns:
+        A tuple of (events with slot/phase assigned, NormalizeStats).
     """
     by_game = defaultdict(list)
     for ev in events:
-        by_game[ev["game_num"]].append(ev)
+        by_game[ev["game_id"]].append(ev)
 
+    stats = NormalizeStats()
     result = []
-    for game_num in sorted(by_game.keys()):
-        game_events = sorted(by_game[game_num], key=_sort_key)
-        slot_ptr = 0  # index into DRAFT_ORDER
+    for game_id in sorted(by_game.keys()):
+        game_events = sorted(by_game[game_id], key=_sort_key)
         for ev in game_events:
             action = ev["action"]
             if action in ("ban", "pick"):
-                side = ev["side"]
-                assigned = False
-                while slot_ptr < len(DRAFT_ORDER):
-                    slot, phase, d_side = DRAFT_ORDER[slot_ptr]
-                    if d_side == side:
-                        ev = dict(ev)
-                        ev["slot"] = slot
-                        ev["phase"] = phase
-                        result.append(ev)
-                        slot_ptr += 1
-                        assigned = True
-                        break
-                    else:
-                        # Skip this template slot — wrong side for this event
-                        slot_ptr += 1
-                if not assigned:
-                    # No more slots — assign a fallback
+                seq = ev.get("seq")
+                if seq is not None:
+                    phase = _phase_from_seq(seq)
+                    # Check side mismatch against standard draft order
+                    if 1 <= seq <= len(DRAFT_SIDE_ORDER):
+                        expected_side = DRAFT_SIDE_ORDER[seq - 1]
+                        if ev["side"] != expected_side:
+                            stats.side_mismatches += 1
                     ev = dict(ev)
-                    ev["slot"] = len(DRAFT_ORDER) + (slot_ptr - len(DRAFT_ORDER) + 1)
+                    ev["slot"] = seq
+                    ev["phase"] = phase
+                    result.append(ev)
+                else:
+                    # No seq — shouldn't happen after undos are folded, but be safe
+                    ev = dict(ev)
+                    ev["slot"] = 0
                     ev["phase"] = "unknown"
                     result.append(ev)
             else:
                 # Shouldn't happen after apply_undos, but keep it safe
                 result.append(ev)
 
-    return result
+    return result, stats
 
 
 def check_completeness(events: list[dict]) -> tuple[list[dict], int]:
@@ -198,13 +196,14 @@ def check_completeness(events: list[dict]) -> tuple[list[dict], int]:
 
     Returns (kept_events, count_of_dropped_games).
     """
+    # Group by game_id (not game_num — game_num repeats across series)
     by_game = defaultdict(list)
     for ev in events:
-        by_game[ev["game_num"]].append(ev)
+        by_game[ev["game_id"]].append(ev)
 
     kept = []
     dropped = 0
-    for game_num, game_events in by_game.items():
+    for game_id, game_events in by_game.items():
         bans = sum(1 for e in game_events if e["action"] == "ban")
         picks = sum(1 for e in game_events if e["action"] == "pick")
         if bans == 10 and picks == 10:
@@ -219,21 +218,23 @@ def flag_games(events: list[dict]) -> list[dict]:
     """Compute game_flags rows: completeness, bo1, fearless_status.
 
     Returns a list of dicts, one per game, with keys:
-        series_id, game_num, is_complete, is_bo1, fearless_status
+        series_id, game_id, game_num, is_complete, is_bo1, fearless_status
     """
+    # Group by game_id (not game_num — game_num repeats across series)
     by_game = defaultdict(list)
     for ev in events:
-        by_game[ev["game_num"]].append(ev)
+        by_game[ev["game_id"]].append(ev)
 
-    # Determine which series have multiple games
+    # Determine which series have multiple games (use game_id to count)
     series_games = defaultdict(set)
     for ev in events:
-        series_games[ev["series_id"]].add(ev["game_num"])
+        series_games[ev["series_id"]].add(ev["game_id"])
 
     flags = []
-    for game_num in sorted(by_game.keys()):
-        game_events = by_game[game_num]
+    for game_id in sorted(by_game.keys()):
+        game_events = by_game[game_id]
         series_id = game_events[0]["series_id"]
+        game_num = game_events[0]["game_num"]
 
         bans = sum(1 for e in game_events if e["action"] == "ban")
         picks = sum(1 for e in game_events if e["action"] == "pick")
@@ -247,6 +248,7 @@ def flag_games(events: list[dict]) -> list[dict]:
 
         flags.append({
             "series_id": series_id,
+            "game_id": game_id,
             "game_num": game_num,
             "is_complete": is_complete,
             "is_bo1": is_bo1,
@@ -257,7 +259,7 @@ def flag_games(events: list[dict]) -> list[dict]:
 
 
 def _detect_fearless(
-    series_id: str, game_nums: set[int], by_game: dict[int, list[dict]]
+    series_id: str, game_ids: set[str], by_game: dict[str, list[dict]]
 ) -> str:
     """Detect Fearless draft status for a series.
 
@@ -265,13 +267,13 @@ def _detect_fearless(
     - 'hard': no repeats found in a multi-game series (proven Fearless)
     - 'ambiguous': single-game series (can't determine)
     """
-    if len(game_nums) <= 1:
+    if len(game_ids) <= 1:
         return "ambiguous"
 
     # Collect all picked champions across all games in the series
     all_picks = []
-    for gn in sorted(game_nums):
-        for ev in by_game[gn]:
+    for gid in sorted(game_ids):
+        for ev in by_game[gid]:
             if ev["action"] == "pick":
                 all_picks.append(ev["champion"])
 

@@ -21,9 +21,23 @@ import csv
 import json
 import re
 from collections.abc import Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import zstandard as zstd
+
+
+@dataclass
+class IngestStats:
+    """Summary statistics returned by iter_draft_events.
+
+    Attributes:
+        skipped_games: Number of events skipped because their game_id was
+            not found in games.csv (abandoned or restarted drafts).
+        events_read: Total number of draft events yielded.
+    """
+    skipped_games: int = 0
+    events_read: int = 0
 
 # Map GRID event types to our internal action names
 ACTION_MAP = {
@@ -66,7 +80,7 @@ def _read_games_meta(games_csv_path: str) -> dict[str, dict]:
     return meta
 
 
-def iter_draft_events(feed_path: str, games_csv_path: str = "") -> Iterator[dict]:
+def iter_draft_events(feed_path: str, games_csv_path: str = "") -> tuple[Iterator[dict], IngestStats]:
     """Yield normalized draft-action dicts from a series feed file.
 
     Contract per yielded dict:
@@ -82,9 +96,12 @@ def iter_draft_events(feed_path: str, games_csv_path: str = "") -> Iterator[dict
     ACTION_MAP are emitted.  Patch, game_num, and side are resolved from
     meta/games.csv (path passed as games_csv_path).
 
-    Raises ValueError when a game_id or team_id cannot be found in games.csv.
-    Yields a summary dict keyed by "_skipped_count" at the end with the count
-    of events that were skipped due to missing metadata.
+    If a game_id is not found in games.csv, the event is skipped (abandoned
+    or restarted draft) and counted in IngestStats.skipped_games.  The rest
+    of the series continues normally.
+
+    Returns:
+        A tuple of (iterator over draft-event dicts, IngestStats).
     """
     # Extract series_id from filename
     feed_name = Path(feed_path).name
@@ -96,80 +113,79 @@ def iter_draft_events(feed_path: str, games_csv_path: str = "") -> Iterator[dict
     # Load games metadata
     games_meta = _read_games_meta(games_csv_path)
 
-    skipped_count = 0
+    stats = IngestStats()
+    skipped_game_ids = set()
 
-    # Stream the zstd-compressed file line by line (true streaming, no full read)
-    with zstd.open(feed_path, "rt", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            envelope = json.loads(line)
-            events = envelope.get("events", [])
-            # Skip envelopes with no draft events before parsing anything else
-            has_draft = any(ev.get("type", "") in ACTION_MAP for ev in events)
-            if not has_draft:
-                continue
-
-            for ev in events:
-                ev_type = ev.get("type", "")
-                if ev_type not in ACTION_MAP:
+    def _event_generator():
+        nonlocal stats
+        # Stream the zstd-compressed file line by line (true streaming, no full read)
+        with zstd.open(feed_path, "rt", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                envelope = json.loads(line)
+                events = envelope.get("events", [])
+                # Skip envelopes with no draft events before parsing anything else
+                has_draft = any(ev.get("type", "") in ACTION_MAP for ev in events)
+                if not has_draft:
                     continue
 
-                team_id = ev["actor"]["id"]
-                champion = ev["target"]["state"]["name"]
-                action = ACTION_MAP[ev_type]
+                for ev in events:
+                    ev_type = ev.get("type", "")
+                    if ev_type not in ACTION_MAP:
+                        continue
 
-                # Resolve game context from seriesStateDelta (real GRID shape)
-                ssd = ev.get("seriesStateDelta", {})
-                games_list = ssd.get("games", [])
-                if not games_list:
-                    skipped_count += 1
-                    continue
-                game_id = games_list[0].get("id", "")
-                if not game_id:
-                    skipped_count += 1
-                    continue
+                    team_id = ev["actor"]["id"]
+                    champion = ev["target"]["state"]["name"]
+                    action = ACTION_MAP[ev_type]
 
-                # Extract sequence number from draftActions (may be missing on undos)
-                seq = None
-                draft_actions = games_list[0].get("draftActions", [])
-                if draft_actions:
-                    seq = draft_actions[0].get("sequenceNumber")
+                    # Resolve game context from seriesStateDelta (real GRID shape)
+                    ssd = ev.get("seriesStateDelta", {})
+                    games_list = ssd.get("games", [])
+                    if not games_list:
+                        continue
+                    game_id = games_list[0].get("id", "")
+                    if not game_id:
+                        continue
 
-                # Look up metadata — raise if game_id not found
-                meta = games_meta.get(game_id)
-                if meta is None:
-                    raise ValueError(
-                        f"game_id '{game_id}' from feed not found in games.csv"
-                    )
+                    # Extract sequence number from draftActions (may be missing on undos)
+                    seq = None
+                    draft_actions = games_list[0].get("draftActions", [])
+                    if draft_actions:
+                        seq = draft_actions[0].get("sequenceNumber")
 
-                # Look up side — raise if team not found for this game
-                side = meta["team_ids"].get(team_id)
-                if side is None:
-                    raise ValueError(
-                        f"team '{team_id}' not found in games.csv for game_id '{game_id}'"
-                    )
+                    # Look up metadata — skip if game_id not found (abandoned draft)
+                    meta = games_meta.get(game_id)
+                    if meta is None:
+                        if game_id not in skipped_game_ids:
+                            skipped_game_ids.add(game_id)
+                            stats.skipped_games += 1
+                        continue
 
-                patch = meta["patch"]
-                game_number = meta["game_number"]
+                    # Look up side — skip if team not found for this game
+                    side = meta["team_ids"].get(team_id)
+                    if side is None:
+                        continue
 
-                yield {
-                    "series_id": series_id,
-                    "game_id": game_id,
-                    "game_num": game_number,
-                    "slot": 0,  # assigned in normalize.py
-                    "phase": "",  # assigned in normalize.py
-                    "side": side,
-                    "team": team_id,
-                    "action": action,
-                    "champion": champion,
-                    "patch": patch,
-                    "league": "",  # not in games.csv; could come from feed metadata
-                    "played_at": envelope.get("occurredAt", ""),
-                    "seq": seq,
-                }
+                    patch = meta["patch"]
+                    game_number = meta["game_number"]
 
-    # Yield skip count as a special summary event
-    if skipped_count > 0:
-        yield {"_skipped_count": skipped_count}
+                    stats.events_read += 1
+                    yield {
+                        "series_id": series_id,
+                        "game_id": game_id,
+                        "game_num": game_number,
+                        "slot": 0,  # assigned in normalize.py
+                        "phase": "",  # assigned in normalize.py
+                        "side": side,
+                        "team": team_id,
+                        "action": action,
+                        "champion": champion,
+                        "patch": patch,
+                        "league": "",  # not in games.csv; could come from feed metadata
+                        "played_at": envelope.get("occurredAt", ""),
+                        "seq": seq,
+                    }
+
+    return _event_generator(), stats
