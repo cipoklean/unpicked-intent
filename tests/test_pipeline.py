@@ -1430,3 +1430,517 @@ class TestBaseline:
                 baseline_mod.DB_PATH = orig_baseline_db
                 if shared_db.exists():
                     shared_db.unlink()
+
+
+class TestSignals:
+    """Tests for scoring/signals.py — Poisson-binomial, left-open, early-ban."""
+
+    def test_poisson_binomial_matches_binomial_equal_p(self):
+        """Poisson-binomial matches plain binomial when all p are equal."""
+        from unpicked_intent.scoring.signals import poisson_binomial_p_value
+
+        # 5 trials, p=0.3 each, t=0 → P(T ≤ 0) = (1-0.3)^5 = 0.7^5
+        probs = [0.3] * 5
+        p_value = poisson_binomial_p_value(0, probs)
+        expected = 0.7 ** 5
+        assert abs(p_value - expected) < 1e-10
+
+        # t=5 → P(T ≤ 5) = 1.0
+        p_value_all = poisson_binomial_p_value(5, probs)
+        assert abs(p_value_all - 1.0) < 1e-10
+
+    def test_poisson_binomial_p_value_t0_equals_product_1_minus_p(self):
+        """p_value for t=0 equals the product of (1 - p)."""
+        from unpicked_intent.scoring.signals import poisson_binomial_p_value
+
+        probs = [0.1, 0.2, 0.3, 0.4]
+        p_value = poisson_binomial_p_value(0, probs)
+        expected = (1 - 0.1) * (1 - 0.2) * (1 - 0.3) * (1 - 0.4)
+        assert abs(p_value - expected) < 1e-10
+
+    def test_poisson_binomial_varying_p(self):
+        """Poisson-binomial with varying p differs from binomial."""
+        from unpicked_intent.scoring.signals import poisson_binomial_p_value
+
+        # Different p per trial
+        probs = [0.1, 0.2, 0.3, 0.4, 0.5]
+        p_value = poisson_binomial_p_value(0, probs)
+        expected = 0.9 * 0.8 * 0.7 * 0.6 * 0.5
+        assert abs(p_value - expected) < 1e-10
+
+        # t=1: P(T ≤ 1)
+        p_value_1 = poisson_binomial_p_value(1, probs)
+        # Should be > P(T=0) since we include T=1
+        assert p_value_1 > p_value
+
+    def test_left_open_drops_k_less_than_4(self):
+        """Tells with k < MIN_N (4) are dropped."""
+        from unpicked_intent.scoring.signals import compute_left_open, MIN_N
+
+        evidence = [
+            {"team": "T1", "player_id": "P1", "role": "top", "champion": "Aatrox",
+             "game_id": f"G{i}", "patch": "16.20", "resolution": "skipped", "pick_rate": 0.3}
+            for i in range(3)
+        ]
+        tells = compute_left_open(evidence)
+        assert len(tells) == 0, f"Expected 0 tells (k=3 < MIN_N=4), got {len(tells)}"
+
+    def test_left_open_emits_at_k_4(self):
+        """A tell with k=4 is emitted."""
+        from unpicked_intent.scoring.signals import compute_left_open
+
+        evidence = [
+            {"team": "T1", "player_id": "P1", "role": "top", "champion": "Aatrox",
+             "game_id": f"G{i}", "patch": "16.20", "resolution": "skipped", "pick_rate": 0.3}
+            for i in range(4)
+        ]
+        tells = compute_left_open(evidence)
+        assert len(tells) == 1
+        assert tells[0]["k"] == 4
+        assert tells[0]["t"] == 0
+
+    def test_left_open_t_count(self):
+        """Taken count is correct."""
+        from unpicked_intent.scoring.signals import compute_left_open
+
+        evidence = [
+            {"team": "T1", "player_id": "P1", "role": "top", "champion": "Aatrox",
+             "game_id": "G1", "patch": "16.20", "resolution": "taken", "pick_rate": 0.3},
+            {"team": "T1", "player_id": "P1", "role": "top", "champion": "Aatrox",
+             "game_id": "G2", "patch": "16.20", "resolution": "skipped", "pick_rate": 0.3},
+            {"team": "T1", "player_id": "P1", "role": "top", "champion": "Aatrox",
+             "game_id": "G3", "patch": "16.20", "resolution": "taken", "pick_rate": 0.3},
+            {"team": "T1", "player_id": "P1", "role": "top", "champion": "Aatrox",
+             "game_id": "G4", "patch": "16.20", "resolution": "skipped", "pick_rate": 0.3},
+        ]
+        tells = compute_left_open(evidence)
+        assert len(tells) == 1
+        assert tells[0]["t"] == 2
+        assert tells[0]["k"] == 4
+
+    def test_left_open_expected_sum(self):
+        """Expected = sum of per-game pick_rates."""
+        from unpicked_intent.scoring.signals import compute_left_open
+
+        evidence = [
+            {"team": "T1", "player_id": "P1", "role": "top", "champion": "Aatrox",
+             "game_id": f"G{i}", "patch": "16.20", "resolution": "skipped", "pick_rate": 0.2 + i * 0.1}
+            for i in range(4)
+        ]
+        tells = compute_left_open(evidence)
+        assert len(tells) == 1
+        expected = 0.2 + 0.3 + 0.4 + 0.5
+        assert abs(tells[0]["expected"] - expected) < 1e-6
+
+    def test_left_open_fit(self):
+        """fit = t / k (share of games on that champion)."""
+        from unpicked_intent.scoring.signals import compute_left_open
+
+        evidence = [
+            {"team": "T1", "player_id": "P1", "role": "top", "champion": "Aatrox",
+             "game_id": "G1", "patch": "16.20", "resolution": "taken", "pick_rate": 0.3},
+            {"team": "T1", "player_id": "P1", "role": "top", "champion": "Aatrox",
+             "game_id": "G2", "patch": "16.20", "resolution": "skipped", "pick_rate": 0.3},
+            {"team": "T1", "player_id": "P1", "role": "top", "champion": "Aatrox",
+             "game_id": "G3", "patch": "16.20", "resolution": "skipped", "pick_rate": 0.3},
+            {"team": "T1", "player_id": "P1", "role": "top", "champion": "Aatrox",
+             "game_id": "G4", "patch": "16.20", "resolution": "skipped", "pick_rate": 0.3},
+        ]
+        tells = compute_left_open(evidence)
+        assert tells[0]["fit"] == 0.25  # 1 taken / 4 total
+
+    def test_left_open_ranked_by_p_value(self):
+        """Tells are ranked by p_value ascending."""
+        from unpicked_intent.scoring.signals import compute_left_open
+
+        # Tell A: high p_value (taken matches expected)
+        evidence_a = [
+            {"team": "T1", "player_id": "P1", "role": "top", "champion": "A",
+             "game_id": f"G{i}", "patch": "16.20", "resolution": "taken", "pick_rate": 0.9}
+            for i in range(4)
+        ]
+        # Tell B: low p_value (0 taken when expected high)
+        evidence_b = [
+            {"team": "T1", "player_id": "P2", "role": "mid", "champion": "B",
+             "game_id": f"G{i}", "patch": "16.20", "resolution": "skipped", "pick_rate": 0.9}
+            for i in range(4)
+        ]
+        tells = compute_left_open(evidence_a + evidence_b)
+        assert len(tells) == 2
+        # B (t=0) should have lower p_value than A (t=4)
+        assert tells[0]["p_value"] < tells[1]["p_value"]
+
+    def test_evidence_skips_two_players_same_role(self):
+        """A game with two players in the same role is skipped."""
+        from unpicked_intent.scoring.signals import build_evidence_rows
+
+        # Two top players on T1 in G1
+        rosters = [
+            {"game_id": "G1", "team_id": "T1", "player_id": "P1", "character_name": "Aatrox",
+             "title": "lol", "participation_status": "active"},
+            {"game_id": "G1", "team_id": "T1", "player_id": "P2", "character_name": "Darius",
+             "title": "lol", "participation_status": "active"},
+        ]
+        player_roles = {
+            "P1": {"role": "top", "share": 1.0, "flex": False},
+            "P2": {"role": "top", "share": 1.0, "flex": False},
+        }
+        champion_roles = {"Aatrox": "top"}
+        champion_game = [
+            {"series_id": "S1", "game_num": 1, "team": "T1", "champion": "Aatrox",
+             "resolution": "skipped", "patch": "16.20"},
+        ]
+        draft_events = [
+            {"series_id": "S1", "game_num": 1, "game_id": "G1", "slot": 1, "action": "ban",
+             "champion": "X", "patch": "16.20", "team": "T1", "side": "blue", "phase": "ban1"},
+        ]
+        game_flags = [
+            {"series_id": "S1", "game_num": 1, "n_picks": 10, "n_bans": 10,
+             "is_complete": True, "is_bo1": False, "fearless_status": "hard"},
+        ]
+        baseline = [
+            {"patch": "16.20", "champion": "Aatrox", "role": "top", "taken": 10, "skipped": 10,
+             "pick_rate": 0.5, "presence": 0.2, "meta_relevant": True, "mean_ban_slot": 3.0,
+             "window_start": "16.20", "window_games": 1},
+        ]
+
+        evidence = build_evidence_rows(
+            champion_game, draft_events, game_flags, baseline,
+            player_roles, rosters, champion_roles,
+        )
+        # P1 and P2 are both top → 2 players with role "top" → skip
+        assert len(evidence) == 0
+
+    def test_evidence_excludes_champion_outside_pool(self):
+        """A champion outside the player's pool (< POOL_MIN_GAMES) is excluded."""
+        from unpicked_intent.scoring.signals import build_evidence_rows, POOL_MIN_GAMES
+
+        # P1 plays Aatrox only once (< POOL_MIN_GAMES=3)
+        rosters = [
+            {"game_id": "G1", "team_id": "T1", "player_id": "P1", "character_name": "Aatrox",
+             "title": "lol", "participation_status": "active"},
+        ]
+        player_roles = {
+            "P1": {"role": "top", "share": 1.0, "flex": False},
+        }
+        champion_roles = {"Aatrox": "top"}
+        champion_game = [
+            {"series_id": "S1", "game_num": 1, "team": "T1", "champion": "Aatrox",
+             "resolution": "skipped", "patch": "16.20"},
+        ]
+        draft_events = [
+            {"series_id": "S1", "game_num": 1, "game_id": "G1", "slot": 1, "action": "ban",
+             "champion": "X", "patch": "16.20", "team": "T1", "side": "blue", "phase": "ban1"},
+        ]
+        game_flags = [
+            {"series_id": "S1", "game_num": 1, "n_picks": 10, "n_bans": 10,
+             "is_complete": True, "is_bo1": False, "fearless_status": "hard"},
+        ]
+        baseline = [
+            {"patch": "16.20", "champion": "Aatrox", "role": "top", "taken": 10, "skipped": 10,
+             "pick_rate": 0.5, "presence": 0.2, "meta_relevant": True, "mean_ban_slot": 3.0,
+             "window_start": "16.20", "window_games": 1},
+        ]
+
+        evidence = build_evidence_rows(
+            champion_game, draft_events, game_flags, baseline,
+            player_roles, rosters, champion_roles,
+        )
+        assert len(evidence) == 0
+
+    def test_evidence_includes_champion_in_pool(self):
+        """A champion played ≥ POOL_MIN_GAMES is included."""
+        from unpicked_intent.scoring.signals import build_evidence_rows, POOL_MIN_GAMES
+
+        # P1 plays Aatrox 3 times (= POOL_MIN_GAMES)
+        rosters = [
+            {"game_id": f"G{i}", "team_id": "T1", "player_id": "P1", "character_name": "Aatrox",
+             "title": "lol", "participation_status": "active"}
+            for i in range(1, 4)
+        ]
+        player_roles = {
+            "P1": {"role": "top", "share": 1.0, "flex": False},
+        }
+        champion_roles = {"Aatrox": "top"}
+        champion_game = [
+            {"series_id": "S1", "game_num": 1, "team": "T1", "champion": "Aatrox",
+             "resolution": "skipped", "patch": "16.20"},
+        ]
+        draft_events = [
+            {"series_id": "S1", "game_num": 1, "game_id": "G1", "slot": 1, "action": "ban",
+             "champion": "X", "patch": "16.20", "team": "T1", "side": "blue", "phase": "ban1"},
+        ]
+        game_flags = [
+            {"series_id": "S1", "game_num": 1, "n_picks": 10, "n_bans": 10,
+             "is_complete": True, "is_bo1": False, "fearless_status": "hard"},
+        ]
+        baseline = [
+            {"patch": "16.20", "champion": "Aatrox", "role": "top", "taken": 10, "skipped": 10,
+             "pick_rate": 0.5, "presence": 0.2, "meta_relevant": True, "mean_ban_slot": 3.0,
+             "window_start": "16.20", "window_games": 1},
+        ]
+
+        evidence = build_evidence_rows(
+            champion_game, draft_events, game_flags, baseline,
+            player_roles, rosters, champion_roles,
+        )
+        assert len(evidence) == 1
+        assert evidence[0]["player_id"] == "P1"
+
+    def test_early_ban_needs_4_bans(self):
+        """Early-ban requires n_bans >= 4."""
+        from unpicked_intent.scoring.signals import compute_early_ban
+
+        draft_events = [
+            {"series_id": f"S{i}", "game_num": 1, "slot": 1, "action": "ban",
+             "champion": "Aatrox", "patch": "16.20", "team": "T1", "side": "blue", "phase": "ban1"}
+            for i in range(3)
+        ]
+        game_flags = [
+            {"series_id": f"S{i}", "game_num": 1, "n_picks": 10, "n_bans": 10,
+             "is_complete": True, "is_bo1": False, "fearless_status": "hard"}
+            for i in range(3)
+        ]
+        baseline = [
+            {"patch": "16.20", "champion": "Aatrox", "role": "top", "taken": 10, "skipped": 10,
+             "pick_rate": 0.5, "presence": 0.2, "meta_relevant": True, "mean_ban_slot": 3.0,
+             "window_start": "16.20", "window_games": 1},
+        ]
+
+        results = compute_early_ban(draft_events, game_flags, baseline)
+        assert len(results) == 0, "3 bans < 4, should be dropped"
+
+    def test_early_ban_emits_at_4_bans(self):
+        """Early-ban emits when n_bans >= 4."""
+        from unpicked_intent.scoring.signals import compute_early_ban
+
+        draft_events = [
+            {"series_id": f"S{i}", "game_num": 1, "slot": 2, "action": "ban",
+             "champion": "Aatrox", "patch": "16.20", "team": "T1", "side": "blue", "phase": "ban1"}
+            for i in range(4)
+        ]
+        game_flags = [
+            {"series_id": f"S{i}", "game_num": 1, "n_picks": 10, "n_bans": 10,
+             "is_complete": True, "is_bo1": False, "fearless_status": "hard"}
+            for i in range(4)
+        ]
+        baseline = [
+            {"patch": "16.20", "champion": "Aatrox", "role": "top", "taken": 10, "skipped": 10,
+             "pick_rate": 0.5, "presence": 0.2, "meta_relevant": True, "mean_ban_slot": 5.0,
+             "window_start": "16.20", "window_games": 1},
+        ]
+
+        results = compute_early_ban(draft_events, game_flags, baseline)
+        assert len(results) == 1
+        assert results[0]["n_bans"] == 4
+        assert results[0]["team_mean_slot"] == 2.0
+        assert results[0]["baseline_mean_slot"] == 5.0
+
+    def test_early_ban_delta_sign(self):
+        """delta = baseline_mean_slot - team_mean_slot; positive means team bans earlier."""
+        from unpicked_intent.scoring.signals import compute_early_ban
+
+        # Team bans at slot 2 (early), baseline mean is 5 → delta = 5 - 2 = 3 (positive)
+        draft_events = [
+            {"series_id": f"S{i}", "game_num": 1, "slot": 2, "action": "ban",
+             "champion": "Aatrox", "patch": "16.20", "team": "T1", "side": "blue", "phase": "ban1"}
+            for i in range(4)
+        ]
+        game_flags = [
+            {"series_id": f"S{i}", "game_num": 1, "n_picks": 10, "n_bans": 10,
+             "is_complete": True, "is_bo1": False, "fearless_status": "hard"}
+            for i in range(4)
+        ]
+        baseline = [
+            {"patch": "16.20", "champion": "Aatrox", "role": "top", "taken": 10, "skipped": 10,
+             "pick_rate": 0.5, "presence": 0.2, "meta_relevant": True, "mean_ban_slot": 5.0,
+             "window_start": "16.20", "window_games": 1},
+        ]
+
+        results = compute_early_ban(draft_events, game_flags, baseline)
+        assert results[0]["delta"] == 3.0  # positive = team bans earlier
+
+        # Team bans at slot 8 (late), baseline mean is 5 → delta = 5 - 8 = -3 (negative)
+        draft_events_late = [
+            {"series_id": f"S{i}", "game_num": 1, "slot": 8, "action": "ban",
+             "champion": "Aatrox", "patch": "16.20", "team": "T1", "side": "blue", "phase": "ban1"}
+            for i in range(4)
+        ]
+        results_late = compute_early_ban(draft_events_late, game_flags, baseline)
+        assert results_late[0]["delta"] == -3.0  # negative = team bans later
+
+    def test_early_ban_skips_no_baseline(self):
+        """Early-ban skips when baseline mean_ban_slot is None."""
+        from unpicked_intent.scoring.signals import compute_early_ban
+
+        draft_events = [
+            {"series_id": f"S{i}", "game_num": 1, "slot": 2, "action": "ban",
+             "champion": "Aatrox", "patch": "16.20", "team": "T1", "side": "blue", "phase": "ban1"}
+            for i in range(4)
+        ]
+        game_flags = [
+            {"series_id": f"S{i}", "game_num": 1, "n_picks": 10, "n_bans": 10,
+             "is_complete": True, "is_bo1": False, "fearless_status": "hard"}
+            for i in range(4)
+        ]
+        baseline = [
+            {"patch": "16.20", "champion": "Aatrox", "role": "top", "taken": 0, "skipped": 0,
+             "pick_rate": 0.0, "presence": 0.0, "meta_relevant": False, "mean_ban_slot": None,
+             "window_start": "16.20", "window_games": 1},
+        ]
+
+        results = compute_early_ban(draft_events, game_flags, baseline)
+        assert len(results) == 0
+
+    def test_signals_derived_path(self):
+        """DERIVED in signals.py resolves to the repo root's derived/ folder."""
+        from unpicked_intent.scoring.signals import DERIVED
+
+        assert DERIVED.name == "derived"
+        pyproject = DERIVED.parent / "pyproject.toml"
+        assert pyproject.is_file(), f"pyproject.toml not found at {pyproject}"
+
+    def test_signals_constants(self):
+        """MIN_N and POOL_MIN_GAMES are named constants."""
+        from unpicked_intent.scoring.signals import MIN_N, POOL_MIN_GAMES
+
+        assert MIN_N == 4
+        assert POOL_MIN_GAMES == 3
+
+    def test_evidence_skips_bo1_games(self):
+        """Evidence rows skip Bo1 games."""
+        from unpicked_intent.scoring.signals import build_evidence_rows
+
+        rosters = [
+            {"game_id": f"G{i}", "team_id": "T1", "player_id": "P1", "character_name": "Aatrox",
+             "title": "lol", "participation_status": "active"}
+            for i in range(1, 5)
+        ]
+        player_roles = {
+            "P1": {"role": "top", "share": 1.0, "flex": False},
+        }
+        champion_roles = {"Aatrox": "top"}
+        champion_game = [
+            {"series_id": "S1", "game_num": 1, "team": "T1", "champion": "Aatrox",
+             "resolution": "skipped", "patch": "16.20"},
+        ]
+        draft_events = [
+            {"series_id": "S1", "game_num": 1, "game_id": "G1", "slot": 1, "action": "ban",
+             "champion": "X", "patch": "16.20", "team": "T1", "side": "blue", "phase": "ban1"},
+        ]
+        # Bo1 game
+        game_flags = [
+            {"series_id": "S1", "game_num": 1, "n_picks": 10, "n_bans": 10,
+             "is_complete": True, "is_bo1": True, "fearless_status": "none"},
+        ]
+        baseline = [
+            {"patch": "16.20", "champion": "Aatrox", "role": "top", "taken": 10, "skipped": 10,
+             "pick_rate": 0.5, "presence": 0.2, "meta_relevant": True, "mean_ban_slot": 3.0,
+             "window_start": "16.20", "window_games": 1},
+        ]
+
+        evidence = build_evidence_rows(
+            champion_game, draft_events, game_flags, baseline,
+            player_roles, rosters, champion_roles,
+        )
+        assert len(evidence) == 0
+
+    def test_evidence_skips_non_meta_relevant(self):
+        """Evidence rows skip champions that are not meta_relevant."""
+        from unpicked_intent.scoring.signals import build_evidence_rows
+
+        rosters = [
+            {"game_id": f"G{i}", "team_id": "T1", "player_id": "P1", "character_name": "Aatrox",
+             "title": "lol", "participation_status": "active"}
+            for i in range(1, 5)
+        ]
+        player_roles = {
+            "P1": {"role": "top", "share": 1.0, "flex": False},
+        }
+        champion_roles = {"Aatrox": "top"}
+        champion_game = [
+            {"series_id": "S1", "game_num": 1, "team": "T1", "champion": "Aatrox",
+             "resolution": "skipped", "patch": "16.20"},
+        ]
+        draft_events = [
+            {"series_id": "S1", "game_num": 1, "game_id": "G1", "slot": 1, "action": "ban",
+             "champion": "X", "patch": "16.20", "team": "T1", "side": "blue", "phase": "ban1"},
+        ]
+        game_flags = [
+            {"series_id": "S1", "game_num": 1, "n_picks": 10, "n_bans": 10,
+             "is_complete": True, "is_bo1": False, "fearless_status": "hard"},
+        ]
+        # Not meta-relevant
+        baseline = [
+            {"patch": "16.20", "champion": "Aatrox", "role": "top", "taken": 0, "skipped": 0,
+             "pick_rate": 0.0, "presence": 0.0, "meta_relevant": False, "mean_ban_slot": None,
+             "window_start": "16.20", "window_games": 1},
+        ]
+
+        evidence = build_evidence_rows(
+            champion_game, draft_events, game_flags, baseline,
+            player_roles, rosters, champion_roles,
+        )
+        assert len(evidence) == 0
+
+    def test_evidence_skips_incomplete_games(self):
+        """Evidence rows skip incomplete games."""
+        from unpicked_intent.scoring.signals import build_evidence_rows
+
+        rosters = [
+            {"game_id": f"G{i}", "team_id": "T1", "player_id": "P1", "character_name": "Aatrox",
+             "title": "lol", "participation_status": "active"}
+            for i in range(1, 5)
+        ]
+        player_roles = {
+            "P1": {"role": "top", "share": 1.0, "flex": False},
+        }
+        champion_roles = {"Aatrox": "top"}
+        champion_game = [
+            {"series_id": "S1", "game_num": 1, "team": "T1", "champion": "Aatrox",
+             "resolution": "skipped", "patch": "16.20"},
+        ]
+        draft_events = [
+            {"series_id": "S1", "game_num": 1, "game_id": "G1", "slot": 1, "action": "ban",
+             "champion": "X", "patch": "16.20", "team": "T1", "side": "blue", "phase": "ban1"},
+        ]
+        # Incomplete game
+        game_flags = [
+            {"series_id": "S1", "game_num": 1, "n_picks": 5, "n_bans": 5,
+             "is_complete": False, "is_bo1": False, "fearless_status": "none"},
+        ]
+        baseline = [
+            {"patch": "16.20", "champion": "Aatrox", "role": "top", "taken": 10, "skipped": 10,
+             "pick_rate": 0.5, "presence": 0.2, "meta_relevant": True, "mean_ban_slot": 3.0,
+             "window_start": "16.20", "window_games": 1},
+        ]
+
+        evidence = build_evidence_rows(
+            champion_game, draft_events, game_flags, baseline,
+            player_roles, rosters, champion_roles,
+        )
+        assert len(evidence) == 0
+
+    def test_early_ban_skips_incomplete_games(self):
+        """Early-ban skips bans from incomplete games."""
+        from unpicked_intent.scoring.signals import compute_early_ban
+
+        draft_events = [
+            {"series_id": f"S{i}", "game_num": 1, "slot": 2, "action": "ban",
+             "champion": "Aatrox", "patch": "16.20", "team": "T1", "side": "blue", "phase": "ban1"}
+            for i in range(4)
+        ]
+        # All incomplete
+        game_flags = [
+            {"series_id": f"S{i}", "game_num": 1, "n_picks": 5, "n_bans": 5,
+             "is_complete": False, "is_bo1": False, "fearless_status": "none"}
+            for i in range(4)
+        ]
+        baseline = [
+            {"patch": "16.20", "champion": "Aatrox", "role": "top", "taken": 10, "skipped": 10,
+             "pick_rate": 0.5, "presence": 0.2, "meta_relevant": True, "mean_ban_slot": 5.0,
+             "window_start": "16.20", "window_games": 1},
+        ]
+
+        results = compute_early_ban(draft_events, game_flags, baseline)
+        assert len(results) == 0
