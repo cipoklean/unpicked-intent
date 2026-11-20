@@ -546,15 +546,30 @@ def run_signals(grid_path: str) -> None:
         )
     """)
 
+    from unpicked_intent.pipeline.build import _bulk_insert
+
     if left_open_tells:
-        tuples = [
+        tuples = (
             (t["team"], t["player_id"], t["role"], t["champion"],
              t["k"], t["t"], t["expected"], t["p_value"], t["q_value"], t["fit"])
             for t in left_open_tells
-        ]
-        con.executemany(
-            "INSERT INTO left_open VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        _bulk_insert(
+            con,
+            "left_open",
             tuples,
+            (
+                ("team", "VARCHAR"),
+                ("player_id", "VARCHAR"),
+                ("role", "VARCHAR"),
+                ("champion", "VARCHAR"),
+                ("k", "INTEGER"),
+                ("t", "INTEGER"),
+                ("expected", "DOUBLE"),
+                ("p_value", "DOUBLE"),
+                ("q_value", "DOUBLE"),
+                ("fit", "DOUBLE"),
+            ),
         )
 
     con.execute("""
@@ -569,14 +584,23 @@ def run_signals(grid_path: str) -> None:
     """)
 
     if early_ban_tells:
-        tuples = [
+        tuples = (
             (t["team"], t["champion"], t["n_bans"],
              t["team_mean_slot"], t["baseline_mean_slot"], t["delta"])
             for t in early_ban_tells
-        ]
-        con.executemany(
-            "INSERT INTO early_ban VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        _bulk_insert(
+            con,
+            "early_ban",
             tuples,
+            (
+                ("team", "VARCHAR"),
+                ("champion", "VARCHAR"),
+                ("n_bans", "INTEGER"),
+                ("team_mean_slot", "DOUBLE"),
+                ("baseline_mean_slot", "DOUBLE"),
+                ("delta", "DOUBLE"),
+            ),
         )
 
     con.close()

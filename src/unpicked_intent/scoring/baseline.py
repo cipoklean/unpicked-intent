@@ -288,7 +288,9 @@ def run_baseline(grid_path: str | None = None) -> None:
     """)
 
     if baseline_rows:
-        tuples = [
+        from unpicked_intent.pipeline.build import _bulk_insert
+
+        tuples = (
             (
                 r["patch"], r["champion"], r["role"],
                 r["taken"], r["skipped"], r["pick_rate"],
@@ -296,10 +298,24 @@ def run_baseline(grid_path: str | None = None) -> None:
                 r["window_start"], r["window_games"],
             )
             for r in baseline_rows
-        ]
-        con.executemany(
-            "INSERT INTO baseline VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        _bulk_insert(
+            con,
+            "baseline",
             tuples,
+            (
+                ("patch", "VARCHAR"),
+                ("champion", "VARCHAR"),
+                ("role", "VARCHAR"),
+                ("taken", "INTEGER"),
+                ("skipped", "INTEGER"),
+                ("pick_rate", "DOUBLE"),
+                ("presence", "DOUBLE"),
+                ("meta_relevant", "BOOLEAN"),
+                ("mean_ban_slot", "DOUBLE"),
+                ("window_start", "VARCHAR"),
+                ("window_games", "INTEGER"),
+            ),
         )
 
     con.close()

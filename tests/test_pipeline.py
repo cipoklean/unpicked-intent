@@ -1147,6 +1147,162 @@ class TestBuildPipeline:
             if created_sentinel and real_db.exists():
                 real_db.unlink()
 
+    def test_bulk_insert_matches_executemany_on_synthetic_fixtures(self, capsys):
+        """Every table's row count and SUM(hash(*)) checksum match between executemany and _bulk_insert."""
+        import csv
+        import tempfile
+        import duckdb
+        import unpicked_intent.pipeline.build as build_mod
+        import unpicked_intent.scoring.baseline as baseline_mod
+        import unpicked_intent.scoring.signals as signals_mod
+        from tests.fixtures.create_synthetic import build_rich_synthetic_grid
+        from unpicked_intent.pipeline.build import _normalize_columns, run_pipeline
+        from unpicked_intent.scoring.baseline import run_baseline
+        from unpicked_intent.scoring.signals import run_signals
+
+        def _legacy_executemany(con, table, rows, columns):
+            col_names = [col for col, _ in _normalize_columns(columns)]
+            row_list = list(rows)
+            if row_list:
+                col_list = ", ".join(col_names)
+                placeholders = ", ".join(["?"] * len(col_names))
+                con.executemany(
+                    f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})",
+                    row_list,
+                )
+            return len(row_list)
+
+        def _write_player_roles(derived_dir: Path) -> None:
+            roles_file = derived_dir / "player_roles.csv"
+            roles_map = {
+                "P1": ("top", 1.0, False),
+                "P2": ("mid", 1.0, False),
+                "P3": ("jungle", 1.0, False),
+                "P4": ("bot", 1.0, False),
+                "P5": ("support", 1.0, False),
+                "P6": ("top", 1.0, False),
+                "P7": ("mid", 1.0, False),
+                "P8": ("jungle", 1.0, False),
+                "P9": ("bot", 1.0, False),
+                "P10": ("support", 1.0, False),
+            }
+            with open(roles_file, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=["player_id", "role", "share", "flex"])
+                writer.writeheader()
+                for pid, (role, share, flex) in roles_map.items():
+                    writer.writerow(
+                        {"player_id": pid, "role": role, "share": share, "flex": flex}
+                    )
+
+        tables = (
+            "draft_events",
+            "game_flags",
+            "champion_game",
+            "names",
+            "baseline",
+            "left_open",
+            "early_ban",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            grid = root / "grid"
+            build_rich_synthetic_grid(grid, team_a="T1", team_b="T2")
+
+            bulk_derived = root / "derived_bulk"
+            bulk_db = bulk_derived / "unpicked.duckdb"
+            legacy_derived = root / "derived_legacy"
+            legacy_db = legacy_derived / "unpicked.duckdb"
+
+            orig_build_derived = build_mod.DERIVED
+            orig_build_db = build_mod.DB_PATH
+            orig_baseline_derived = baseline_mod.DERIVED
+            orig_baseline_db = baseline_mod.DB_PATH
+            orig_signals_derived = signals_mod.DERIVED
+            orig_signals_db = signals_mod.DB_PATH
+            orig_bulk_insert = build_mod._bulk_insert
+
+            try:
+                # 1. New bulk CSV COPY path
+                build_mod.DERIVED = bulk_derived
+                build_mod.DB_PATH = bulk_db
+                baseline_mod.DERIVED = bulk_derived
+                baseline_mod.DB_PATH = bulk_db
+                signals_mod.DERIVED = bulk_derived
+                signals_mod.DB_PATH = bulk_db
+
+                run_pipeline(str(grid))
+                run_baseline()
+                _write_player_roles(bulk_derived)
+                run_signals(str(grid))
+                bulk_stdout = capsys.readouterr().out
+
+                # 2. Legacy executemany path
+                build_mod.DERIVED = legacy_derived
+                build_mod.DB_PATH = legacy_db
+                baseline_mod.DERIVED = legacy_derived
+                baseline_mod.DB_PATH = legacy_db
+                signals_mod.DERIVED = legacy_derived
+                signals_mod.DB_PATH = legacy_db
+                build_mod._bulk_insert = _legacy_executemany
+
+                run_pipeline(str(grid))
+                run_baseline()
+                _write_player_roles(legacy_derived)
+                run_signals(str(grid))
+                capsys.readouterr()
+            finally:
+                build_mod._bulk_insert = orig_bulk_insert
+                build_mod.DERIVED = orig_build_derived
+                build_mod.DB_PATH = orig_build_db
+                baseline_mod.DERIVED = orig_baseline_derived
+                baseline_mod.DB_PATH = orig_baseline_db
+                signals_mod.DERIVED = orig_signals_derived
+                signals_mod.DB_PATH = orig_signals_db
+
+            # Verify timing output printed for every table write
+            for tbl in tables:
+                assert f"{tbl}: " in bulk_stdout and " rows in " in bulk_stdout, (
+                    f"Missing elapsed-time log for {tbl} in stdout:\n{bulk_stdout}"
+                )
+
+            con_bulk = duckdb.connect(str(bulk_db), read_only=True)
+            con_legacy = duckdb.connect(str(legacy_db), read_only=True)
+            try:
+                for tbl in tables:
+                    cols = [r[0] for r in con_bulk.execute(f"DESCRIBE {tbl}").fetchall()]
+                    col_list = ", ".join(cols)
+                    q = f"SELECT COUNT(*), SUM(hash({col_list})) FROM {tbl}"
+                    bulk_count, bulk_hash = con_bulk.execute(q).fetchone()
+                    legacy_count, legacy_hash = con_legacy.execute(q).fetchone()
+                    assert bulk_count > 0, f"Expected non-empty table {tbl}"
+                    assert bulk_count == legacy_count, (
+                        f"{tbl} row count mismatch: bulk={bulk_count}, legacy={legacy_count}"
+                    )
+                    assert bulk_hash == legacy_hash, (
+                        f"{tbl} checksum mismatch: bulk={bulk_hash}, legacy={legacy_hash}"
+                    )
+
+                # Explicit checks on NULL, empty-string, and boolean handling
+                bulk_null_bans = con_bulk.execute(
+                    "SELECT COUNT(*) FROM baseline WHERE mean_ban_slot IS NULL"
+                ).fetchone()[0]
+                legacy_null_bans = con_legacy.execute(
+                    "SELECT COUNT(*) FROM baseline WHERE mean_ban_slot IS NULL"
+                ).fetchone()[0]
+                assert bulk_null_bans > 0 and bulk_null_bans == legacy_null_bans
+
+                bulk_empty_league = con_bulk.execute(
+                    "SELECT COUNT(*) FROM draft_events WHERE league = ''"
+                ).fetchone()[0]
+                legacy_empty_league = con_legacy.execute(
+                    "SELECT COUNT(*) FROM draft_events WHERE league = ''"
+                ).fetchone()[0]
+                assert bulk_empty_league > 0 and bulk_empty_league == legacy_empty_league
+            finally:
+                con_bulk.close()
+                con_legacy.close()
+
 
 class TestBaseline:
     """Tests for scoring/baseline.py — patch windows, pick_rate, presence, mean_ban_slot."""

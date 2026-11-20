@@ -15,7 +15,10 @@ import argparse
 import csv
 import glob
 import sys
+import tempfile
+import time
 from collections import Counter
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 import duckdb
@@ -26,6 +29,150 @@ DERIVED = Path(__file__).resolve().parents[3] / "derived"
 DB_PATH = DERIVED / "unpicked.duckdb"
 
 SCHEMA_SQL = Path(__file__).resolve().parent / "schema.sql"
+
+NULL_SENTINEL = r"\N"
+
+DRAFT_EVENTS_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("series_id", "VARCHAR"),
+    ("game_id", "VARCHAR"),
+    ("game_num", "INTEGER"),
+    ("slot", "INTEGER"),
+    ("phase", "VARCHAR"),
+    ("side", "VARCHAR"),
+    ("team", "VARCHAR"),
+    ("action", "VARCHAR"),
+    ("champion", "VARCHAR"),
+    ("patch", "VARCHAR"),
+    ("league", "VARCHAR"),
+    ("played_at", "TIMESTAMP"),
+)
+
+GAME_FLAGS_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("series_id", "VARCHAR"),
+    ("game_num", "INTEGER"),
+    ("n_picks", "INTEGER"),
+    ("n_bans", "INTEGER"),
+    ("is_complete", "BOOLEAN"),
+    ("is_bo1", "BOOLEAN"),
+    ("fearless_status", "VARCHAR"),
+)
+
+CHAMPION_GAME_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("series_id", "VARCHAR"),
+    ("game_num", "INTEGER"),
+    ("team", "VARCHAR"),
+    ("champion", "VARCHAR"),
+    ("resolution", "VARCHAR"),
+)
+
+NAMES_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("kind", "VARCHAR"),
+    ("id", "VARCHAR"),
+    ("name", "VARCHAR"),
+)
+
+
+def _normalize_columns(
+    columns: Mapping[str, str] | Sequence[str] | Sequence[tuple[str, str]],
+) -> list[tuple[str, str | None]]:
+    """Normalize *columns* into ``[(name, optional_sql_type), ...]``."""
+    if isinstance(columns, Mapping):
+        return [(str(col), str(dtype)) for col, dtype in columns.items()]
+    result: list[tuple[str, str | None]] = []
+    for item in columns:
+        if isinstance(item, tuple):
+            col, dtype = item
+            result.append((str(col), str(dtype)))
+        else:
+            result.append((str(item), None))
+    return result
+
+
+def _bulk_insert(
+    con: duckdb.DuckDBPyConnection,
+    table: str,
+    rows: Iterable[Sequence[object]],
+    columns: Mapping[str, str] | Sequence[str] | Sequence[tuple[str, str]],
+) -> int:
+    """Bulk-load *rows* into DuckDB *table* via a temporary CSV and ``COPY``.
+
+    DuckDB's Python ``con.executemany`` executes one row at a time and can stall
+    for tens of minutes on ~594k rows (especially on ARM). Writing to a temp CSV
+    inside ``tempfile.TemporaryDirectory`` and loading via ``COPY ... FROM`` with
+    ``AUTO_DETECT false`` uses the target table's explicit schema types and
+    preserves ``None`` (via ``NULLSTR '\\N'``) and ``bool`` semantics identically
+    to ``executemany``.
+
+    Args:
+        con: Open DuckDB connection.
+        table: Target table name (must already exist in *con*).
+        rows: Iterable of row tuples matching *columns* order.
+        columns: Column names (``Sequence[str]``) or explicit ``(name, type)``
+            pairs / mapping matching the table's schema.
+
+    Returns:
+        Number of rows written.
+    """
+    col_specs = _normalize_columns(columns)
+    if not col_specs:
+        raise ValueError(f"columns must not be empty for table {table!r}")
+
+    # Validate column names (and explicit types, when provided) against the table schema.
+    schema_rows = con.execute(f"DESCRIBE {table}").fetchall()
+    schema_types = {row[0]: str(row[1]).upper() for row in schema_rows}
+    col_names: list[str] = []
+    for col_name, expected_type in col_specs:
+        if col_name not in schema_types:
+            raise ValueError(f"Column {col_name!r} does not exist on table {table!r}")
+        if expected_type is not None and schema_types[col_name] != expected_type.upper():
+            raise ValueError(
+                f"Type mismatch for {table}.{col_name}: "
+                f"expected {expected_type.upper()}, schema has {schema_types[col_name]}"
+            )
+        col_names.append(col_name)
+
+    t0 = time.perf_counter()
+    row_count = 0
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        csv_path = Path(tmpdir) / f"{table}.csv"
+        with open(csv_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(
+                f,
+                delimiter=",",
+                quotechar='"',
+                doublequote=True,
+                quoting=csv.QUOTE_MINIMAL,
+                lineterminator="\n",
+            )
+            writer.writerow(col_names)
+            for row in rows:
+                writer.writerow(
+                    NULL_SENTINEL
+                    if v is None
+                    else ("true" if v is True else ("false" if v is False else v))
+                    for v in row
+                )
+                row_count += 1
+
+        if row_count > 0:
+            sql_path = csv_path.as_posix().replace("'", "''")
+            col_list = ", ".join(col_names)
+            con.execute(
+                f"COPY {table} ({col_list}) FROM '{sql_path}' ("
+                "HEADER true, "
+                "DELIMITER ',', "
+                "QUOTE '\"', "
+                "ESCAPE '\"', "
+                "NEW_LINE '\\n', "
+                f"NULLSTR '{NULL_SENTINEL}', "
+                "ALLOW_QUOTED_NULLS false, "
+                "AUTO_DETECT false)"
+            )
+
+    elapsed = time.perf_counter() - t0
+    print(f"{table}: {row_count:,} rows in {elapsed:.1f}s")
+    return row_count
 
 
 def load_names(meta_dir: Path) -> list[tuple[str, str, str]]:
@@ -150,8 +297,8 @@ def run_pipeline(grid_path: str) -> None:
     schema_text = SCHEMA_SQL.read_text()
     con.execute(schema_text)
 
-    # Write draft_events (complete games only) using DuckDB's append
-    draft_tuples = [
+    # Write draft_events (complete games only)
+    draft_tuples = (
         (
             ev["series_id"],
             ev["game_id"],
@@ -167,15 +314,11 @@ def run_pipeline(grid_path: str) -> None:
             ev.get("played_at", ""),
         )
         for ev in complete
-    ]
-    if draft_tuples:
-        con.executemany(
-            "INSERT INTO draft_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            draft_tuples,
-        )
+    )
+    _bulk_insert(con, "draft_events", draft_tuples, DRAFT_EVENTS_COLUMNS)
 
     # Write game_flags
-    flag_tuples = [
+    flag_tuples = (
         (
             f["series_id"],
             f["game_num"],
@@ -186,31 +329,19 @@ def run_pipeline(grid_path: str) -> None:
             f["fearless_status"],
         )
         for f in complete_flags
-    ]
-    if flag_tuples:
-        con.executemany(
-            "INSERT INTO game_flags VALUES (?, ?, ?, ?, ?, ?, ?)",
-            flag_tuples,
-        )
+    )
+    _bulk_insert(con, "game_flags", flag_tuples, GAME_FLAGS_COLUMNS)
 
     # Write champion_game
-    cg_tuples = [
+    cg_tuples = (
         (r["series_id"], r["game_num"], r["team"], r["champion"], r["status"])
         for r in cg_rows
-    ]
-    if cg_tuples:
-        con.executemany(
-            "INSERT INTO champion_game VALUES (?, ?, ?, ?, ?)",
-            cg_tuples,
-        )
+    )
+    _bulk_insert(con, "champion_game", cg_tuples, CHAMPION_GAME_COLUMNS)
 
     # Write names (LoL teams and players from meta/teams.csv and meta/players.csv)
     names_tuples = load_names(grid / "meta")
-    if names_tuples:
-        con.executemany(
-            "INSERT INTO names (kind, id, name) VALUES (?, ?, ?)",
-            names_tuples,
-        )
+    _bulk_insert(con, "names", names_tuples, NAMES_COLUMNS)
 
     con.close()
 
