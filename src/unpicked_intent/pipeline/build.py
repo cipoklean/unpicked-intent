@@ -12,6 +12,7 @@ Only complete games (10 bans + 10 picks after undo folding) are written.
 from __future__ import annotations
 
 import argparse
+import csv
 import glob
 import sys
 from collections import Counter
@@ -25,6 +26,39 @@ DERIVED = Path(__file__).resolve().parents[3] / "derived"
 DB_PATH = DERIVED / "unpicked.duckdb"
 
 SCHEMA_SQL = Path(__file__).resolve().parent / "schema.sql"
+
+
+def load_names(meta_dir: Path) -> list[tuple[str, str, str]]:
+    """Load LoL team and player display names from meta/teams.csv and meta/players.csv.
+
+    Keeps only rows where ``title == 'lol'`` and deduplicates by ``(kind, id)``.
+
+    Args:
+        meta_dir: Path to the GRID ``meta/`` directory.
+
+    Returns:
+        Sorted list of ``(kind, id, name)`` tuples where ``kind`` is
+        ``'team'`` or ``'player'``.
+    """
+    names_map: dict[tuple[str, str], str] = {}
+
+    sources = (
+        ("team", meta_dir / "teams.csv", "team_id"),
+        ("player", meta_dir / "players.csv", "player_id"),
+    )
+    for kind, csv_path, id_col in sources:
+        if not csv_path.is_file():
+            continue
+        with open(csv_path, encoding="utf-8-sig", newline="") as f:
+            for row in csv.DictReader(f):
+                if row.get("title") != "lol":
+                    continue
+                item_id = (row.get(id_col) or "").strip()
+                item_name = (row.get("name") or "").strip()
+                if item_id and item_name:
+                    names_map[(kind, item_id)] = item_name
+
+    return [(kind, item_id, name) for (kind, item_id), name in sorted(names_map.items())]
 
 
 def run_pipeline(grid_path: str) -> None:
@@ -170,6 +204,14 @@ def run_pipeline(grid_path: str) -> None:
             cg_tuples,
         )
 
+    # Write names (LoL teams and players from meta/teams.csv and meta/players.csv)
+    names_tuples = load_names(grid / "meta")
+    if names_tuples:
+        con.executemany(
+            "INSERT INTO names (kind, id, name) VALUES (?, ?, ?)",
+            names_tuples,
+        )
+
     con.close()
 
     # --- Print summary ---
@@ -180,6 +222,7 @@ def run_pipeline(grid_path: str) -> None:
     print(f"\nWrote {DB_PATH}")
     print(f"Games written: {game_count}")
     print(f"Champion-game rows: {cg_count}")
+    print(f"Names rows: {len(names_tuples)}")
     print("Counts per resolution:")
     for status in ("burned", "banned", "taken", "denied", "skipped"):
         print(f"  {status}: {resolution_counts.get(status, 0)}")

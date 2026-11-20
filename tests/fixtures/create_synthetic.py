@@ -194,5 +194,136 @@ def create_synthetic_feed():
     print(f"Created {feed_path}, {feed_path3}, and {games_csv}")
 
 
+def build_rich_synthetic_grid(grid: Path, team_a: str = "T1", team_b: str = "T2") -> None:
+    """Create a 5-series (10 complete non-Bo1 games) synthetic GRID directory.
+
+    Produces non-empty baseline mean_ban_slot (Azir & Viktor banned 10 times),
+    non-empty left_open (P1 takes Aatrox 3x and skips 4x -> k=7 >= 4),
+    and non-empty early_ban (team_a bans Azir 5x at slot 1, Viktor 5x at slot 1).
+    """
+    import csv
+    import shutil
+
+    lol_dir = grid / "lol"
+    lol_dir.mkdir(parents=True, exist_ok=True)
+    meta_dir = grid / "meta"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy synthetic meta/teams.csv and meta/players.csv
+    shutil.copy(FIXTURES / "meta" / "teams.csv", meta_dir / "teams.csv")
+    shutil.copy(FIXTURES / "meta" / "players.csv", meta_dir / "players.csv")
+
+    games_rows = []
+    rosters_rows = []
+
+    g1_bans = [
+        "Azir", "Viktor", "LeBlanc", "Ryze", "Annie",
+        "Yasuo", "Yone", "Zed", "Ahri", "Syndra",
+    ]
+    # Ban index 6 is slot 13 (ban2, red = team_b), ban index 0 is slot 1 (ban1, blue = team_a)
+    g2_bans = [
+        "Viktor", "LeBlanc", "Ryze", "Annie", "Yasuo",
+        "Yone", "Azir", "Zed", "Ahri", "Syndra",
+    ]
+
+    # Picks order in _make_complete_game_events:
+    # Blue slots: indices 0, 3, 4, 7, 8
+    # Red slots:  indices 1, 2, 5, 6, 9
+    def _interleave(blue_picks: list[str], red_picks: list[str]) -> list[str]:
+        picks = [""] * 10
+        for idx, champ in zip((0, 3, 4, 7, 8), blue_picks):
+            picks[idx] = champ
+        for idx, champ in zip((1, 2, 5, 6, 9), red_picks):
+            picks[idx] = champ
+        return picks
+
+    for s_idx in range(1, 6):
+        series_id = f"RICH-{s_idx}"
+        g1_id = f"RG{s_idx}_1"
+        g2_id = f"RG{s_idx}_2"
+
+        # Game 1: team_a picks Aatrox in series 1..3, skips Aatrox (picks Garen) in series 4..5
+        top_a_g1 = "Aatrox" if s_idx <= 3 else "Garen"
+        blue_g1 = [top_a_g1, "Graves", "Jinx", "Thresh", "Orianna"]
+        red_g1 = ["Renekton", "Lee Sin", "Caitlyn", "Nautilus", "Lissandra"]
+        g1_events = _make_complete_game_events(
+            g1_id, team_a, team_b, g1_bans, _interleave(blue_g1, red_g1)
+        )
+
+        # Game 2: completely disjoint picks (valid Hard Fearless)
+        blue_g2 = ["Darius", "Jarvan IV", "Ezreal", "Braum", "Taliyah"]
+        red_g2 = ["K'Sante", "Sejuani", "Kai'Sa", "Leona", "Corki"]
+        g2_events = _make_complete_game_events(
+            g2_id, team_a, team_b, g2_bans, _interleave(blue_g2, red_g2)
+        )
+
+        envelopes = [
+            {"occurredAt": f"2026-11-0{s_idx}T10:00:00Z", "events": g1_events},
+            {"occurredAt": f"2026-11-0{s_idx}T11:00:00Z", "events": g2_events},
+        ]
+        feed_path = lol_dir / f"events_{series_id}_grid.jsonl.zst"
+        jsonl_text = "\n".join(json.dumps(env) for env in envelopes) + "\n"
+        feed_path.write_bytes(zstd.compress(jsonl_text.encode("utf-8")))
+
+        for game_id, game_num, blue_p, red_p in [
+            (g1_id, 1, blue_g1, red_g1),
+            (g2_id, 2, blue_g2, red_g2),
+        ]:
+            games_rows.append({
+                "series_id": series_id,
+                "game_id": game_id,
+                "game_number": game_num,
+                "patch": "16.20",
+                "team1_id": team_a,
+                "team1_side": "blue",
+                "team2_id": team_b,
+                "team2_side": "red",
+            })
+            # Rosters: P1=top, P3=jungle, P4=bot, P5=support, P2=mid for team_a
+            team_a_players = [
+                ("P1", "AlphaTop", blue_p[0]),
+                ("P3", "AlphaJgl", blue_p[1]),
+                ("P4", "AlphaBot", blue_p[2]),
+                ("P5", "AlphaSup", blue_p[3]),
+                ("P2", "AlphaMid", blue_p[4]),
+            ]
+            team_b_players = [
+                ("P6", "BetaTop", red_p[0]),
+                ("P8", "BetaJgl", red_p[1]),
+                ("P9", "BetaBot", red_p[2]),
+                ("P10", "BetaSup", red_p[3]),
+                ("P7", "BetaMid", red_p[4]),
+            ]
+            for tid, plist in ((team_a, team_a_players), (team_b, team_b_players)):
+                for pid, pname, champ in plist:
+                    rosters_rows.append({
+                        "series_id": series_id,
+                        "game_id": game_id,
+                        "game_num": game_num,
+                        "team_id": tid,
+                        "player_id": pid,
+                        "player_name": pname,
+                        "character_name": champ,
+                        "title": "lol",
+                        "participation_status": "active",
+                    })
+
+    with open(meta_dir / "games.csv", "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=[
+            "series_id", "game_id", "game_number", "patch",
+            "team1_id", "team1_side", "team2_id", "team2_side",
+        ])
+        writer.writeheader()
+        writer.writerows(games_rows)
+
+    with open(meta_dir / "rosters.csv", "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=[
+            "series_id", "game_id", "game_num", "team_id", "player_id",
+            "player_name", "character_name", "title", "participation_status",
+        ])
+        writer.writeheader()
+        writer.writerows(rosters_rows)
+
+
 if __name__ == "__main__":
     create_synthetic_feed()

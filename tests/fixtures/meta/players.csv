@@ -1,0 +1,12 @@
+title,player_id,name
+lol,P1,AlphaTop
+lol,P2,AlphaMid
+lol,P3,AlphaJgl
+lol,P4,AlphaBot
+lol,P5,AlphaSup
+lol,P6,BetaTop
+lol,P7,BetaMid
+lol,P8,BetaJgl
+lol,P9,BetaBot
+lol,P10,BetaSup
+val,P_VAL,ValPlayer

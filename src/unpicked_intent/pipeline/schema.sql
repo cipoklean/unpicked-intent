@@ -42,3 +42,11 @@ CREATE TABLE IF NOT EXISTS champion_game (
                 ('skipped','taken','denied','banned','burned')),
     PRIMARY KEY (series_id, game_num, team, champion)
 );
+
+-- Display names for LoL teams and players, from meta/teams.csv and meta/players.csv
+CREATE TABLE IF NOT EXISTS names (
+    kind        VARCHAR NOT NULL CHECK (kind IN ('team','player')),
+    id          VARCHAR NOT NULL,
+    name        VARCHAR NOT NULL,
+    PRIMARY KEY (kind, id)
+);

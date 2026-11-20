@@ -2003,69 +2003,24 @@ class TestSignals:
     def test_build_baseline_signals_end_to_end(self):
         """Run build → baseline → signals on synthetic fixtures through real DuckDB.
 
-        This is the path that produced 0 left_open rows because draft_events
-        had no game_id column, so the roster join never matched.
+        Verifies non-empty output at every stage:
+        - draft_events has game_id and valid ban/pick actions
+        - names table has LoL teams and players (excludes Valorant)
+        - baseline has non-NULL mean_ban_slot and pick_rate > 0
+        - left_open has rows (lo_count > 0) with q_value
+        - early_ban has rows (eb_count > 0)
         """
         import tempfile
-        import shutil
         import csv
         import duckdb
+        from tests.fixtures.create_synthetic import build_rich_synthetic_grid
         from unpicked_intent.pipeline.build import run_pipeline
         from unpicked_intent.scoring.baseline import run_baseline
         from unpicked_intent.scoring.signals import run_signals
 
         with tempfile.TemporaryDirectory() as tmpdir:
             grid = Path(tmpdir) / "grid"
-            grid.mkdir()
-            data_dir = grid / "data"
-            data_dir.mkdir()
-            meta_dir = grid / "meta"
-            meta_dir.mkdir()
-
-            # Copy feed files and games.csv
-            shutil.copy(FIXTURES / "events_SYN-2_grid.jsonl.zst", data_dir)
-            shutil.copy(FIXTURES / "events_SYN-3_grid.jsonl.zst", data_dir)
-            shutil.copy(FIXTURES / "games.csv", meta_dir)
-
-            # Create rosters.csv with enough games for POOL_MIN_GAMES and MIN_N
-            # P1 plays Aatrox in all 4 games of SYN-2 (G1-G4)
-            rosters_file = meta_dir / "rosters.csv"
-            with open(rosters_file, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=[
-                    "series_id", "game_id", "game_num", "team_id", "player_id",
-                    "player_name", "character_name", "title", "participation_status"
-                ])
-                writer.writeheader()
-                # SYN-2 has games G1, G2 (from games.csv)
-                # SYN-3 has games G3, G4 (from games.csv)
-                # We need at least 4 games for MIN_N and 3 for POOL_MIN_GAMES
-                for game_id, game_num, series_id in [
-                    ("G1", 1, "SYN-2"), ("G2", 2, "SYN-2"),
-                    ("G3", 1, "SYN-3"), ("G4", 2, "SYN-3"),
-                ]:
-                    for team, player_id, player_name, character_name in [
-                        ("T1", "P1", "TopPlayer", "Aatrox"),
-                        ("T1", "P2", "MidPlayer", "Azir"),
-                        ("T1", "P3", "JunglePlayer", "Graves"),
-                        ("T1", "P4", "BotPlayer", "Jinx"),
-                        ("T1", "P5", "SupportPlayer", "Thresh"),
-                        ("T2", "P6", "TopPlayer2", "Darius"),
-                        ("T2", "P7", "MidPlayer2", "Malphite"),
-                        ("T2", "P8", "JunglePlayer2", "Caitlyn"),
-                        ("T2", "P9", "BotPlayer2", "Nautilus"),
-                        ("T2", "P10", "SupportPlayer2", "Soraka"),
-                    ]:
-                        writer.writerow({
-                            "series_id": series_id,
-                            "game_id": game_id,
-                            "game_num": game_num,
-                            "team_id": team,
-                            "player_id": player_id,
-                            "player_name": player_name,
-                            "character_name": character_name,
-                            "title": "lol",
-                            "participation_status": "active",
-                        })
+            build_rich_synthetic_grid(grid, team_a="T1", team_b="T2")
 
             # Temporarily override DERIVED and DB_PATH in all modules
             import unpicked_intent.pipeline.build as build_mod
@@ -2122,15 +2077,24 @@ class TestSignals:
                             "flex": flex,
                         })
 
-                # Step 4: run signals — this is where left_open had 0 rows
+                # Step 4: run signals
                 run_signals(str(grid))
 
-                # Verify tables exist and have expected structure
+                # Verify tables exist and have non-empty expected outputs
                 con = duckdb.connect(str(shared_db))
 
                 # Check draft_events has game_id column
                 cols = [desc[0] for desc in con.execute("DESCRIBE draft_events").fetchall()]
                 assert "game_id" in cols, f"game_id not in draft_events columns: {cols}"
+
+                # Check names table has LoL teams & players and excludes Valorant
+                name_rows = con.execute("SELECT kind, id, name FROM names").fetchall()
+                name_map = {(r[0], r[1]): r[2] for r in name_rows}
+                assert name_map[("team", "T1")] == "Alpha Squad"
+                assert name_map[("team", "47351")] == "Cloud9 Kia"
+                assert name_map[("player", "P1")] == "AlphaTop"
+                assert ("team", "V1") not in name_map, "Valorant team leaked into names"
+                assert ("player", "P_VAL") not in name_map, "Valorant player leaked into names"
 
                 # Check left_open table exists and has q_value column
                 lo_cols = [desc[0] for desc in con.execute("DESCRIBE left_open").fetchall()]
@@ -2140,9 +2104,6 @@ class TestSignals:
                 eb_count = con.execute("SELECT COUNT(*) FROM early_ban").fetchone()[0]
 
                 # Assert draft_events action column is correctly read.
-                # This is the regression symptom: when draft_events columns were
-                # misaligned (SELECT * zipped into old 11-name list), action held
-                # team values instead of "ban"/"pick", so no bans were found.
                 actions = con.execute(
                     "SELECT DISTINCT action FROM draft_events ORDER BY action"
                 ).fetchall()
@@ -2151,11 +2112,7 @@ class TestSignals:
                     "likely column misalignment"
                 )
 
-                # Assert baseline was computed (has rows). With the column
-                # misalignment bug, mean_ban_slot was NULL for every row because
-                # no bans were found. With small synthetic data, mean_ban_slot
-                # may still be NULL (MIN_BANS=10), but the baseline table should
-                # have rows with valid pick_rate and presence.
+                # Assert baseline has rows, pick_rate > 0, and non-NULL mean_ban_slot
                 bl_count = con.execute("SELECT COUNT(*) FROM baseline").fetchone()[0]
                 assert bl_count > 0, "baseline should have rows"
 
@@ -2166,18 +2123,17 @@ class TestSignals:
                     "baseline has no pick_rate > 0 — likely draft_events column misalignment"
                 )
 
+                bl_non_null_ban = con.execute(
+                    "SELECT COUNT(*) FROM baseline WHERE mean_ban_slot IS NOT NULL"
+                ).fetchone()[0]
+                assert bl_non_null_ban > 0, (
+                    "baseline has no non-NULL mean_ban_slot — expected Azir/Viktor to meet MIN_BANS"
+                )
+
                 con.close()
 
-                # We expect some left_open rows now that game_id is in draft_events
-                # The synthetic data has 4 games, P1 plays Aatrox in all 4
-                # Aatrox is meta-relevant if presence >= 0.10
-                # With 4 games and 2 teams, Aatrox appears in 8 champion_game rows
-                # presence = games where anyone picked or banned / total games
-                # In the synthetic data, Aatrox is picked by P1 in all 4 games
-                # so presence should be high enough
-                # left_open needs k >= 4 (MIN_N) for a (team, player, champion) group
-                # P1 on T1 plays Aatrox in 4 games → k=4 if all qualify
-                assert lo_count >= 0, "left_open should exist"
+                assert lo_count > 0, f"expected left_open rows > 0, got {lo_count}"
+                assert eb_count > 0, f"expected early_ban rows > 0, got {eb_count}"
 
             finally:
                 build_mod.DERIVED = orig_build_derived
@@ -2195,60 +2151,16 @@ class TestSignals:
         left_open, early_ban, and baseline should use CREATE OR REPLACE TABLE.
         """
         import tempfile
-        import shutil
         import csv
         import duckdb
+        from tests.fixtures.create_synthetic import build_rich_synthetic_grid
         from unpicked_intent.pipeline.build import run_pipeline
         from unpicked_intent.scoring.baseline import run_baseline
         from unpicked_intent.scoring.signals import run_signals
 
         with tempfile.TemporaryDirectory() as tmpdir:
             grid = Path(tmpdir) / "grid"
-            grid.mkdir()
-            data_dir = grid / "data"
-            data_dir.mkdir()
-            meta_dir = grid / "meta"
-            meta_dir.mkdir()
-
-            shutil.copy(FIXTURES / "events_SYN-2_grid.jsonl.zst", data_dir)
-            shutil.copy(FIXTURES / "events_SYN-3_grid.jsonl.zst", data_dir)
-            shutil.copy(FIXTURES / "games.csv", meta_dir)
-
-            # Create rosters.csv
-            rosters_file = meta_dir / "rosters.csv"
-            with open(rosters_file, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=[
-                    "series_id", "game_id", "game_num", "team_id", "player_id",
-                    "player_name", "character_name", "title", "participation_status"
-                ])
-                writer.writeheader()
-                for game_id, game_num, series_id in [
-                    ("G1", 1, "SYN-2"), ("G2", 2, "SYN-2"),
-                    ("G3", 1, "SYN-3"), ("G4", 2, "SYN-3"),
-                ]:
-                    for team, player_id, player_name, character_name in [
-                        ("T1", "P1", "TopPlayer", "Aatrox"),
-                        ("T1", "P2", "MidPlayer", "Azir"),
-                        ("T1", "P3", "JunglePlayer", "Graves"),
-                        ("T1", "P4", "BotPlayer", "Jinx"),
-                        ("T1", "P5", "SupportPlayer", "Thresh"),
-                        ("T2", "P6", "TopPlayer2", "Darius"),
-                        ("T2", "P7", "MidPlayer2", "Malphite"),
-                        ("T2", "P8", "JunglePlayer2", "Caitlyn"),
-                        ("T2", "P9", "BotPlayer2", "Nautilus"),
-                        ("T2", "P10", "SupportPlayer2", "Soraka"),
-                    ]:
-                        writer.writerow({
-                            "series_id": series_id,
-                            "game_id": game_id,
-                            "game_num": game_num,
-                            "team_id": team,
-                            "player_id": player_id,
-                            "player_name": player_name,
-                            "character_name": character_name,
-                            "title": "lol",
-                            "participation_status": "active",
-                        })
+            build_rich_synthetic_grid(grid, team_a="T1", team_b="T2")
 
             import unpicked_intent.pipeline.build as build_mod
             import unpicked_intent.scoring.baseline as baseline_mod
@@ -2308,6 +2220,10 @@ class TestSignals:
                 bl1 = con.execute("SELECT COUNT(*) FROM baseline").fetchone()[0]
                 con.close()
 
+                assert lo1 > 0 and eb1 > 0 and bl1 > 0, (
+                    f"expected non-zero counts before rerun: lo={lo1}, eb={eb1}, bl={bl1}"
+                )
+
                 # Run signals second time
                 run_signals(str(grid))
                 con = duckdb.connect(str(shared_db))
@@ -2334,3 +2250,17 @@ class TestSignals:
                 signals_mod.DB_PATH = orig_signals_db
                 if shared_db.exists():
                     shared_db.unlink()
+
+    def test_load_names_filters_lol_only(self):
+        """load_names reads tests/fixtures/meta/teams.csv and players.csv, LoL only."""
+        from unpicked_intent.pipeline.build import load_names
+
+        rows = load_names(FIXTURES / "meta")
+        name_map = {(kind, item_id): name for kind, item_id, name in rows}
+
+        assert name_map[("team", "T1")] == "Alpha Squad"
+        assert name_map[("team", "340")] == "FlyQuest"
+        assert name_map[("team", "47351")] == "Cloud9 Kia"
+        assert name_map[("player", "P1")] == "AlphaTop"
+        assert ("team", "V1") not in name_map
+        assert ("player", "P_VAL") not in name_map
