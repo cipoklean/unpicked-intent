@@ -64,6 +64,7 @@ assumptions.** The second check is what made this work.
 | 12 | 5df6d02 | rerun doubled every row | tables appended instead of replaced | run twice, counts unchanged |
 | 13 | a1e543a | early-ban dropped to 0 rows | a new column shifted a `SELECT *` | explicit column names everywhere |
 | 14 | 62d5eaf | pytest silently deleted the scouting DB (found when the static export failed) | `finally` restored `build_mod.DB_PATH` to the real path before calling `unlink()` | guard test asserts real `derived/unpicked.duckdb` is untouched |
+| 15 | 8a3a9ad | build stalled >50 min on ARM VM right after dropping incomplete games | `con.executemany` wrote ~594k `champion_game` rows one-by-one in DuckDB Python API | bulk CSV `COPY` matches `executemany` row counts & `SUM(hash(...))` on every table |
 
 ## Where a human made the call
 
@@ -98,5 +99,6 @@ Junie implemented; decisions that change what the tool *claims* stayed with me:
 | 2026-11-20 | e13cf46 | Web UI wording fixes: hedge lead action lines (`p < 0.05`) in opponent & self-scout views, update self-scout banner copy | 131 |
 | 2026-11-20 | 62d5eaf | Static site exporter (`export_static.py`) for Vercel, `app.js` `data-static="1"` switch, `dist/` data boundary & Deploy README | 137 |
 | 2026-11-20 | 8a3a9ad | Fix pytest deleting real `derived/unpicked.duckdb` (#14), audit test `unlink`s, add real-DB guard test | 138 |
+| 2026-11-20 | 0dc8e45 | Replace DuckDB `executemany` with CSV `COPY` `_bulk_insert` across build/baseline/signals (#15), timing logs, checksum equivalence test | 139 |
 
 *Next: scouting API, UI, video. Screenshots of Junie sessions in PyCharm go here.*
