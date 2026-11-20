@@ -1,0 +1,33 @@
+# ==== Python ====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# ==== GRID license boundary ==========================
+# Test: could this file exist without the feed? If no,
+# it is a derived extract and must NOT be committed.
+data/
+derived/
+*.zst
+*.jsonl
+*.parquet
+*.duckdb
+*.duckdb.wal
+*.db
+*.sqlite
+*.sqlite3
+*.csv
+
+# Exceptions (not feed-derived):
+# hand-sourced game knowledge:
+!static/champion_roles.csv
+# synthetic fixtures only:
+!tests/fixtures/
+!tests/fixtures/**
+# =====================================================
+
+# NOTE: .idea/ and .junie/ are committed ON PURPOSE
+# (hackathon rules encourage them as tooling evidence).

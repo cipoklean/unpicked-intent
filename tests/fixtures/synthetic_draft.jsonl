@@ -1,0 +1,6 @@
+{"series_id":"SYN-1","game_num":1,"slot":1,"phase":"ban1","side":"blue","team":"Team A","action":"ban","champion":"Kalista","patch":"16.20","league":"SYN"}
+{"series_id":"SYN-1","game_num":1,"slot":2,"phase":"ban1","side":"red","team":"Team B","action":"ban","champion":"Ksante","patch":"16.20","league":"SYN"}
+{"series_id":"SYN-1","game_num":1,"slot":3,"phase":"pick1","side":"blue","team":"Team A","action":"pick","champion":"Azir","patch":"16.20","league":"SYN"}
+{"series_id":"SYN-1","game_num":1,"slot":4,"phase":"pick1","side":"red","team":"Team B","action":"pick","champion":"Viktor","patch":"16.20","league":"SYN"}
+{"series_id":"SYN-1","game_num":2,"slot":1,"phase":"ban1","side":"blue","team":"Team B","action":"ban","champion":"Corki","patch":"16.20","league":"SYN"}
+{"series_id":"SYN-1","game_num":2,"slot":2,"phase":"pick1","side":"blue","team":"Team B","action":"pick","champion":"Ahri","patch":"16.20","league":"SYN"}
