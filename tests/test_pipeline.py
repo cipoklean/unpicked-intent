@@ -810,3 +810,173 @@ class TestLegalPool:
                 assert r["status"] == "burned", (
                     f"{champ} in G4 for {r['team']} should be burned, got {r['status']}"
                 )
+
+
+ROSTERS_CSV = str(FIXTURES / "rosters.csv")
+
+
+class TestInferPlayers:
+    """Tests for roles/infer_players.py."""
+
+    def test_infer_returns_role_and_share(self):
+        """infer() returns role, share, and flex for each player."""
+        from unpicked_intent.roles.infer_players import infer, build_champion_history
+
+        history = build_champion_history(ROSTERS_CSV)
+        priors = _load_champion_roles()
+        result = infer(history, priors)
+
+        assert "P1" in result
+        assert "role" in result["P1"]
+        assert "share" in result["P1"]
+        assert "flex" in result["P1"]
+
+    def test_specialized_player_not_flex(self):
+        """A player who only plays one role has share=1.0 and flex=False."""
+        from unpicked_intent.roles.infer_players import infer, build_champion_history
+
+        history = build_champion_history(ROSTERS_CSV)
+        priors = _load_champion_roles()
+        result = infer(history, priors)
+
+        # P1 plays Aatrox (top) in all 4 games → 100% top
+        assert result["P1"]["role"] == "top"
+        assert result["P1"]["share"] == 1.0
+        assert result["P1"]["flex"] is False
+
+    def test_flex_player_flagged(self):
+        """A player who plays 4 different roles equally is flagged as flex."""
+        from unpicked_intent.roles.infer_players import infer, build_champion_history
+
+        history = build_champion_history(ROSTERS_CSV)
+        priors = _load_champion_roles()
+        result = infer(history, priors)
+
+        # P_FLEX plays Aatrox(top), Azir(mid), Graves(jungle), Jinx(bot) — 1 each = 25% each
+        assert result["P_FLEX"]["flex"] is True
+        assert result["P_FLEX"]["share"] == 0.25
+
+    def test_flex_player_argmax(self):
+        """Flex player's role is the argmax (first most common role)."""
+        from unpicked_intent.roles.infer_players import infer
+
+        # 2 top, 1 mid, 1 jungle → top wins with 50% share, still flex
+        history = {"P1": ["Aatrox", "Darius", "Azir", "Graves"]}
+        priors = _load_champion_roles()
+        result = infer(history, priors)
+        assert result["P1"]["role"] == "top"
+        assert result["P1"]["share"] == 0.5
+        assert result["P1"]["flex"] is True
+
+    def test_apply_overrides_changes_role(self):
+        """apply_overrides() replaces the inferred role when the file exists."""
+        from unpicked_intent.roles.infer_players import infer, apply_overrides
+        import tempfile
+
+        history = {"P1": ["Aatrox", "Darius", "Azir", "Graves"]}
+        priors = _load_champion_roles()
+        result = infer(history, priors)
+        assert result["P1"]["role"] == "top"
+
+        # Create a temporary overrides file
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False, newline="", encoding="utf-8") as f:
+            f.write("player_id,role\n")
+            f.write("P1,mid\n")
+            tmp_path = Path(f.name)
+
+        try:
+            result = apply_overrides(result, overrides_path=tmp_path)
+            assert result["P1"]["role"] == "mid"
+            assert result["P1"]["flex"] is False
+        finally:
+            tmp_path.unlink()
+
+    def test_apply_overrides_no_file(self):
+        """apply_overrides() is a no-op when the overrides file doesn't exist."""
+        from unpicked_intent.roles.infer_players import infer, apply_overrides
+
+        history = {"P1": ["Aatrox"]}
+        priors = _load_champion_roles()
+        result = infer(history, priors)
+        result2 = apply_overrides(result, overrides_path=Path("/nonexistent/overrides.csv"))
+        assert result2["P1"]["role"] == "top"
+
+    def test_build_champion_history_skips_inactive(self):
+        """build_champion_history() uses only participation_status == 'active'."""
+        from unpicked_intent.roles.infer_players import build_champion_history
+
+        history = build_champion_history(ROSTERS_CSV)
+        # P_FLEX has one inactive row (G1 Aatrox) and 4 active rows
+        # The inactive one should be excluded
+        flex_champs = history.get("P_FLEX", [])
+        # Active rows: G1 Aatrox, G2 Azir, G3 Graves, G4 Jinx = 4 champs
+        assert len(flex_champs) == 4
+        # The inactive row is also Aatrox, so champs are the same either way,
+        # but we verify the count is 4 (active only), not 5 (if inactive included)
+
+    def test_map_team_picks_joins_rosters(self):
+        """map_team_picks() joins draft events with rosters to get player_id."""
+        from unpicked_intent.roles.infer_players import map_team_picks
+
+        events, _ = _load_all()
+        folded = apply_undos(events)
+        slotted, _ = assign_slots(folded)
+        kept, _ = check_completeness(slotted)
+
+        mapped = map_team_picks(kept, ROSTERS_CSV)
+
+        # Only picks should be returned
+        assert all(m["action"] == "pick" for m in mapped)
+
+        # Each mapped row should have player_id and player_name
+        for m in mapped:
+            assert "player_id" in m
+            assert "player_name" in m
+
+    def test_map_team_picks_with_roles_attaches_role(self):
+        """map_team_picks_with_roles() attaches the inferred role to each pick."""
+        from unpicked_intent.roles.infer_players import (
+            infer,
+            build_champion_history,
+            map_team_picks_with_roles,
+        )
+
+        history = build_champion_history(ROSTERS_CSV)
+        priors = _load_champion_roles()
+        player_roles = infer(history, priors)
+
+        events, _ = _load_all()
+        folded = apply_undos(events)
+        slotted, _ = assign_slots(folded)
+        kept, _ = check_completeness(slotted)
+
+        mapped = map_team_picks_with_roles(kept, ROSTERS_CSV, player_roles)
+
+        for m in mapped:
+            assert "role" in m
+            # P1 plays Aatrox (top)
+            if m["player_id"] == "P1":
+                assert m["role"] == "top"
+
+    def test_write_player_roles_creates_csv(self):
+        """write_player_roles() writes a valid CSV under derived/."""
+        from unpicked_intent.roles.infer_players import write_player_roles
+        import tempfile
+
+        inferred = {
+            "P1": {"role": "top", "share": 1.0, "flex": False},
+            "P2": {"role": "mid", "share": 0.8, "flex": False},
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "player_roles.csv"
+            write_player_roles(inferred, output_path=out)
+
+            assert out.is_file()
+            with open(out, encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+            assert len(rows) == 2
+            roles = {r["player_id"]: r for r in rows}
+            assert roles["P1"]["role"] == "top"
+            assert roles["P1"]["flex"] == "False"
