@@ -1039,3 +1039,254 @@ class TestInferPlayers:
             roles = {r["player_id"]: r for r in rows}
             assert roles["P1"]["role"] == "top"
             assert roles["P1"]["flex"] == "False"
+
+
+class TestBuildPipeline:
+    """Tests for pipeline/build.py — DERIVED path and pipeline orchestration."""
+
+    def test_derived_path_next_to_pyproject(self):
+        """DERIVED in build.py resolves to the repo root's derived/ folder."""
+        from unpicked_intent.pipeline.build import DERIVED
+
+        assert DERIVED.name == "derived"
+        pyproject = DERIVED.parent / "pyproject.toml"
+        assert pyproject.is_file(), f"pyproject.toml not found at {pyproject}"
+
+    def test_run_pipeline_on_synthetic_fixtures(self):
+        """run_pipeline processes synthetic fixtures and writes DuckDB."""
+        import tempfile
+        import shutil
+        from unpicked_intent.pipeline.build import run_pipeline, DERIVED, DB_PATH
+
+        # Create a synthetic GRID repo structure
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = Path(tmpdir)
+            data_dir = grid / "data"
+            data_dir.mkdir()
+            meta_dir = grid / "meta"
+            meta_dir.mkdir()
+
+            # Copy feed files and games.csv
+            shutil.copy(FIXTURES / "events_SYN-2_grid.jsonl.zst", data_dir)
+            shutil.copy(FIXTURES / "events_SYN-3_grid.jsonl.zst", data_dir)
+            shutil.copy(FIXTURES / "games.csv", meta_dir)
+
+            # Temporarily override DERIVED and DB_PATH
+            import unpicked_intent.pipeline.build as build_mod
+            orig_derived = build_mod.DERIVED
+            orig_db = build_mod.DB_PATH
+            try:
+                build_mod.DERIVED = Path(tmpdir) / "derived"
+                build_mod.DB_PATH = build_mod.DERIVED / "unpicked.duckdb"
+                run_pipeline(str(grid))
+
+                assert build_mod.DB_PATH.exists()
+
+                import duckdb
+                con = duckdb.connect(str(build_mod.DB_PATH))
+
+                # Check draft_events
+                de_count = con.execute("SELECT COUNT(*) FROM draft_events").fetchone()[0]
+                # G1 (complete) + G3 (complete) + G4 (complete) = 3 games × 20 events = 60
+                assert de_count == 60, f"Expected 60 draft_events, got {de_count}"
+
+                # Check game_flags
+                gf_count = con.execute("SELECT COUNT(*) FROM game_flags").fetchone()[0]
+                assert gf_count == 3, f"Expected 3 game_flags, got {gf_count}"
+
+                # Check champion_game
+                cg_count = con.execute("SELECT COUNT(*) FROM champion_game").fetchone()[0]
+                # 3 games × 2 teams × universe_size
+                # Universe = all champions in champion_roles.csv (173)
+                # But resolve_champion_games uses the roles dict as universe
+                # So cg_count = 3 × 2 × 173 = 1038
+                assert cg_count > 0, "Expected champion_game rows"
+
+                con.close()
+            finally:
+                build_mod.DERIVED = orig_derived
+                build_mod.DB_PATH = orig_db
+                # Clean up any DB created
+                if build_mod.DB_PATH.exists():
+                    build_mod.DB_PATH.unlink()
+
+
+class TestBaseline:
+    """Tests for scoring/baseline.py — patch windows, pick_rate, presence, mean_ban_slot."""
+
+    def test_patch_sort_key_numeric(self):
+        """_patch_sort_key sorts patches numerically: 16.9 < 16.10 < 16.11."""
+        from unpicked_intent.scoring.baseline import _patch_sort_key
+
+        assert _patch_sort_key("16.9") < _patch_sort_key("16.10")
+        assert _patch_sort_key("16.10") < _patch_sort_key("16.11")
+        assert _patch_sort_key("16.1") < _patch_sort_key("16.2")
+        assert _patch_sort_key("15.23") < _patch_sort_key("16.1")
+
+    def test_played_patch_windows_skipped_patch(self):
+        """A skipped patch number (e.g. 16.5 not in the list) doesn't break windows."""
+        from unpicked_intent.scoring.baseline import played_patch_windows
+
+        # Simulate: 16.4, 16.9, 16.10, 16.11 (16.5, 16.6-8 not played)
+        patches = ["16.4", "16.9", "16.10", "16.11"]
+        windows = played_patch_windows(patches, width=3)
+
+        # First patch gets window of 1
+        assert windows["16.4"] == ["16.4"]
+        # Second gets 2
+        assert windows["16.9"] == ["16.4", "16.9"]
+        # Third gets 3
+        assert windows["16.10"] == ["16.4", "16.9", "16.10"]
+        # Fourth gets 3 (drops oldest)
+        assert windows["16.11"] == ["16.9", "16.10", "16.11"]
+
+    def test_played_patch_windows_numeric_order(self):
+        """Windows respect numeric patch order, not string order."""
+        from unpicked_intent.scoring.baseline import played_patch_windows
+
+        # Mix of patches where string sort would be wrong
+        patches = ["16.10", "16.9", "16.2"]
+        windows = played_patch_windows(patches, width=3)
+
+        # Sorted numerically: 16.2, 16.9, 16.10
+        assert windows["16.2"] == ["16.2"]
+        assert windows["16.9"] == ["16.2", "16.9"]
+        assert windows["16.10"] == ["16.2", "16.9", "16.10"]
+
+    def test_pick_rate_excludes_denied_banned_burned(self):
+        """pick_rate = taken / (taken + skipped), excluding denied/banned/burned."""
+        from unpicked_intent.scoring.baseline import compute_baseline
+
+        # 1 game, 2 teams, 3 champions in universe
+        # Champ A: taken by T1, skipped by T2 → taken=1, skipped=1 → pick_rate=0.5
+        # Champ B: banned → taken=0, skipped=0 → pick_rate=0
+        # Champ C: burned → taken=0, skipped=0 → pick_rate=0
+        cg_rows = [
+            # T1
+            {"series_id": "S1", "game_num": 1, "team": "T1", "champion": "A", "resolution": "taken", "patch": "16.20"},
+            {"series_id": "S1", "game_num": 1, "team": "T1", "champion": "B", "resolution": "banned", "patch": "16.20"},
+            {"series_id": "S1", "game_num": 1, "team": "T1", "champion": "C", "resolution": "burned", "patch": "16.20"},
+            # T2
+            {"series_id": "S1", "game_num": 1, "team": "T2", "champion": "A", "resolution": "skipped", "patch": "16.20"},
+            {"series_id": "S1", "game_num": 1, "team": "T2", "champion": "B", "resolution": "banned", "patch": "16.20"},
+            {"series_id": "S1", "game_num": 1, "team": "T2", "champion": "C", "resolution": "burned", "patch": "16.20"},
+        ]
+        draft_events = []
+        champion_roles = {"A": "top", "B": "mid", "C": "jungle"}
+
+        baseline = compute_baseline(cg_rows, draft_events, champion_roles)
+
+        a_row = [r for r in baseline if r["champion"] == "A"][0]
+        assert a_row["taken"] == 1
+        assert a_row["skipped"] == 1
+        assert a_row["pick_rate"] == 0.5
+
+        b_row = [r for r in baseline if r["champion"] == "B"][0]
+        assert b_row["pick_rate"] == 0.0
+
+    def test_presence_calculation(self):
+        """presence = games where anyone picked or banned it / games in window."""
+        from unpicked_intent.scoring.baseline import compute_baseline
+
+        # 2 games, champ A picked in game 1, banned in game 2
+        # presence = 2/2 = 1.0
+        cg_rows = [
+            # Game 1: A taken by T1, skipped by T2
+            {"series_id": "S1", "game_num": 1, "team": "T1", "champion": "A", "resolution": "taken", "patch": "16.20"},
+            {"series_id": "S1", "game_num": 1, "team": "T2", "champion": "A", "resolution": "skipped", "patch": "16.20"},
+            # Game 2: A banned by both teams
+            {"series_id": "S1", "game_num": 2, "team": "T1", "champion": "A", "resolution": "banned", "patch": "16.20"},
+            {"series_id": "S1", "game_num": 2, "team": "T2", "champion": "A", "resolution": "banned", "patch": "16.20"},
+        ]
+        draft_events = []
+        champion_roles = {"A": "top"}
+
+        baseline = compute_baseline(cg_rows, draft_events, champion_roles)
+        a_row = [r for r in baseline if r["champion"] == "A"][0]
+        assert a_row["presence"] == 1.0
+        assert a_row["meta_relevant"] is True
+
+    def test_mean_ban_slot_none_below_min_bans(self):
+        """mean_ban_slot is None when total bans < MIN_BANS (10)."""
+        from unpicked_intent.scoring.baseline import compute_baseline, MIN_BANS
+
+        # Only 5 bans for champ A — below MIN_BANS=10
+        # Need at least one cg_row so the patch window is created
+        cg_rows = [
+            {"series_id": "S0", "game_num": 1, "team": "T1", "champion": "A",
+             "resolution": "skipped", "patch": "16.20"},
+        ]
+        draft_events = [
+            {"series_id": f"S{i}", "game_num": 1, "slot": i + 1, "action": "ban",
+             "champion": "A", "patch": "16.20"}
+            for i in range(5)
+        ]
+        champion_roles = {"A": "top"}
+
+        baseline = compute_baseline(cg_rows, draft_events, champion_roles)
+        a_row = [r for r in baseline if r["champion"] == "A"][0]
+        assert a_row["mean_ban_slot"] is None
+
+    def test_mean_ban_slot_computed_at_min_bans(self):
+        """mean_ban_slot is computed when bans >= MIN_BANS."""
+        from unpicked_intent.scoring.baseline import compute_baseline, MIN_BANS
+
+        # Exactly MIN_BANS bans at slot 3 each
+        # Need at least one cg_row so the patch window is created
+        cg_rows = [
+            {"series_id": "S0", "game_num": 1, "team": "T1", "champion": "A",
+             "resolution": "skipped", "patch": "16.20"},
+        ]
+        draft_events = [
+            {"series_id": f"S{i}", "game_num": 1, "slot": 3, "action": "ban",
+             "champion": "A", "patch": "16.20"}
+            for i in range(MIN_BANS)
+        ]
+        champion_roles = {"A": "top"}
+
+        baseline = compute_baseline(cg_rows, draft_events, champion_roles)
+        a_row = [r for r in baseline if r["champion"] == "A"][0]
+        assert a_row["mean_ban_slot"] == 3.0
+
+    def test_meta_relevant_threshold(self):
+        """meta_relevant = presence >= META_PRESENCE (0.10)."""
+        from unpicked_intent.scoring.baseline import compute_baseline, META_PRESENCE
+
+        # 10 games, champ A appears in 1 → presence = 0.1 → meta_relevant
+        cg_rows = []
+        for i in range(10):
+            cg_rows.append({
+                "series_id": f"S{i}", "game_num": 1, "team": "T1",
+                "champion": "A", "resolution": "skipped", "patch": "16.20",
+            })
+            cg_rows.append({
+                "series_id": f"S{i}", "game_num": 1, "team": "T2",
+                "champion": "A", "resolution": "skipped", "patch": "16.20",
+            })
+        # Game 0: A taken by T1 (so it appears in 1 game)
+        cg_rows[0] = {
+            "series_id": "S0", "game_num": 1, "team": "T1",
+            "champion": "A", "resolution": "taken", "patch": "16.20",
+        }
+        draft_events = []
+        champion_roles = {"A": "top"}
+
+        baseline = compute_baseline(cg_rows, draft_events, champion_roles)
+        a_row = [r for r in baseline if r["champion"] == "A"][0]
+        assert a_row["presence"] == 0.1
+        assert a_row["meta_relevant"] is True  # exactly at threshold
+
+    def test_baseline_constants(self):
+        """META_PRESENCE and MIN_BANS are named constants."""
+        from unpicked_intent.scoring.baseline import META_PRESENCE, MIN_BANS
+
+        assert META_PRESENCE == 0.10
+        assert MIN_BANS == 10
+
+    def test_derived_path_next_to_pyproject(self):
+        """DERIVED in baseline.py resolves to the repo root's derived/ folder."""
+        from unpicked_intent.scoring.baseline import DERIVED
+
+        assert DERIVED.name == "derived"
+        pyproject = DERIVED.parent / "pyproject.toml"
+        assert pyproject.is_file(), f"pyproject.toml not found at {pyproject}"
