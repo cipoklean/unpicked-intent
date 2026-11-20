@@ -112,46 +112,37 @@ def resolve_champion_games(
     """
     universe = _get_champion_universe(champion_roles)
 
-    # Group events by game_id
+    # Group events by game_id and by series_id once (avoids O(N^2) scans)
     by_game: dict[str, list[dict]] = defaultdict(list)
+    by_series: dict[str, list[dict]] = defaultdict(list)
     for ev in series_drafts:
         by_game[ev["game_id"]].append(ev)
-
-    # Build a lookup for game_flags
-    flags_by_game: dict[str, dict] = {}
-    if game_flags:
-        for f in game_flags:
-            flags_by_game[f["game_id"]] = f
+        by_series[ev["series_id"]].append(ev)
 
     # Determine which series are Bo1
-    series_ids: set[str] = set()
-    for ev in series_drafts:
-        series_ids.add(ev["series_id"])
+    flags_by_series: dict[str, bool] = {}
+    for f in (game_flags or []):
+        flags_by_series.setdefault(f["series_id"], f["is_bo1"])
 
     series_is_bo1: dict[str, bool] = {}
-    for sid in series_ids:
-        flag = next((f for f in (game_flags or []) if f["series_id"] == sid), None)
-        if flag:
-            series_is_bo1[sid] = flag["is_bo1"]
+    for sid, s_events in by_series.items():
+        if sid in flags_by_series:
+            series_is_bo1[sid] = flags_by_series[sid]
         else:
             # Fallback: count games in series_drafts for this series
-            series_game_ids = {ev["game_id"] for ev in series_drafts if ev["series_id"] == sid}
+            series_game_ids = {ev["game_id"] for ev in s_events}
             series_is_bo1[sid] = len(series_game_ids) <= 1
-
-    # Sort games within each series by game_num for burned set calculation
-    series_ids_in_drafts: set[str] = set()
-    for ev in series_drafts:
-        series_ids_in_drafts.add(ev["series_id"])
 
     rows: list[dict] = []
 
-    for series_id in sorted(series_ids_in_drafts):
+    for series_id in sorted(by_series.keys()):
         is_bo1 = series_is_bo1.get(series_id, False)
+        s_events = by_series[series_id]
 
         # Get all games in this series, sorted by game_num
         series_game_ids = sorted(
-            {ev["game_id"] for ev in series_drafts if ev["series_id"] == series_id},
-            key=lambda gid: next(ev["game_num"] for ev in by_game[gid]),
+            {ev["game_id"] for ev in s_events},
+            key=lambda gid: by_game[gid][0]["game_num"],
         )
 
         for game_id in series_game_ids:
@@ -160,11 +151,7 @@ def resolve_champion_games(
             patch = game_events[0].get("patch", "")
 
             # Compute burned set for this game
-            burned = _burned_champions(
-                [ev for ev in series_drafts if ev["series_id"] == series_id],
-                game_num,
-                is_bo1,
-            )
+            burned = _burned_champions(s_events, game_num, is_bo1)
 
             # Collect bans (either team) and picks (by team) in this game
             bans_this_game: set[str] = set()

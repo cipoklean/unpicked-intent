@@ -15,5 +15,5 @@ STATIC = Path(__file__).resolve().parents[3] / "static" / "champion_roles.csv"
 
 def load() -> dict[str, str]:
     """Return {champion_name: role} from the committed static table."""
-    with STATIC.open() as f:
+    with STATIC.open(encoding="utf-8", newline="") as f:
         return {r["champion"]: r["role"] for r in csv.DictReader(f)}

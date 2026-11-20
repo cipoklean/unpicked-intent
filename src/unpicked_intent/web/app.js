@@ -207,10 +207,7 @@ function render503State(detail) {
     `<div class="state-code">HTTP 503 · SCOUTING DATABASE UNAVAILABLE</div>
      <h2 class="state-title">Build derived/unpicked.duckdb before opening the UI</h2>
      <p class="state-detail">${escapeHtml(detail)}</p>
-     <pre class="code-block">python -m unpicked_intent.pipeline.build --grid &lt;path-to-grid-repo&gt;
-python -m unpicked_intent.roles.infer_players --grid &lt;path-to-grid-repo&gt;
-python -m unpicked_intent.scoring.baseline
-python -m unpicked_intent.scoring.signals --grid &lt;path-to-grid-repo&gt;</pre>
+     <pre class="code-block">uv run python -m unpicked_intent.pipeline.run_all --grid &lt;path-to-grid-repo&gt;</pre>
      <div class="state-actions">
        <button type="button" class="btn btn-primary" data-action="retry-init">Retry connection</button>
      </div>`,

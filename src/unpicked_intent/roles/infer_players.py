@@ -33,7 +33,7 @@ def infer(
     For each player, count how many times each role appears across their
     champions (via the champion→role priors). The role with the highest
     count wins. Also compute the role share (top role count / total) so
-    callers can flag flex players whose top role is under 70%.
+    callers can flag flex players whose top role is under FLEX_THRESHOLD (50%).
 
     Args:
         champion_history: {player_id: [champion, ...]} built from
@@ -128,10 +128,11 @@ def map_team_picks(
     draft_events: list[dict],
     rosters_path: str,
 ) -> list[dict]:
-    """Map each team pick in a game to (player_id, role).
+    """Map each team pick in a game to its player from rosters.csv.
 
-    Joins rosters.csv on game_id + team_id + character_name to resolve
-    which player picked which champion, then attaches the inferred role.
+    Joins rosters.csv (title == 'lol', participation_status == 'active') on
+    game_id + team_id + character_name to resolve which player picked which
+    champion. Use map_team_picks_with_roles() to attach inferred roles.
 
     Args:
         draft_events: Normalized draft events (after undo folding and
@@ -140,7 +141,7 @@ def map_team_picks(
 
     Returns:
         List of dicts with keys: series_id, game_id, game_num, team,
-        side, slot, phase, action, champion, player_id, player_name, role.
+        side, slot, phase, action, champion, player_id, player_name.
     """
     # Build roster lookup: (game_id, team_id, character_name) -> player info
     roster_lookup: dict[tuple[str, str, str], dict] = {}
@@ -237,14 +238,9 @@ def write_player_roles(
     return output_path
 
 
-def main():
-    """CLI entry: python -m unpicked_intent.roles.infer_players --grid <path>"""
-    parser = argparse.ArgumentParser(description="Infer player roles from GRID rosters.")
-    parser.add_argument("--grid", required=True, help="Path to GRID starter repo (contains meta/rosters.csv)")
-    args = parser.parse_args()
-
-    grid_path = Path(args.grid)
-    rosters_path = grid_path / "meta" / "rosters.csv"
+def run_infer_players(grid_path: str) -> Path:
+    """Infer LoL player roles from *grid_path*/meta/rosters.csv and write derived/player_roles.csv."""
+    rosters_path = Path(grid_path) / "meta" / "rosters.csv"
 
     if not rosters_path.is_file():
         print(f"Error: {rosters_path} not found", file=sys.stderr)
@@ -264,6 +260,15 @@ def main():
     # Write output — never outside derived/
     output = write_player_roles(inferred)
     print(f"Wrote {output.name} ({len(inferred)} players)")
+    return output
+
+
+def main():
+    """CLI entry: python -m unpicked_intent.roles.infer_players --grid <path>"""
+    parser = argparse.ArgumentParser(description="Infer player roles from GRID rosters.")
+    parser.add_argument("--grid", required=True, help="Path to GRID starter repo (contains meta/rosters.csv)")
+    args = parser.parse_args()
+    run_infer_players(args.grid)
 
 
 if __name__ == "__main__":

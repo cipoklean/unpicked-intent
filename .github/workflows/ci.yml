@@ -23,5 +23,11 @@ jobs:
       - name: Data-boundary check
         run: bash scripts/check_data_boundary.sh
 
+      - name: Lint Python (ruff)
+        run: uv run ruff check src tests
+
+      - name: Syntax-check frontend JS
+        run: node --check src/unpicked_intent/web/app.js
+
       - name: Run tests
         run: uv run pytest -q

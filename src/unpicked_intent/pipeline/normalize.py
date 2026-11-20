@@ -32,7 +32,7 @@ class NormalizeStats:
         side_mismatches: Number of events whose acting team's side did not
             match the standard pro draft order for that slot.
         meta_side_disagreements: Number of games where the derived side
-            (from draft, team at seq 1 = blue) disagrees with games.csv side.
+            (from draft majority vote across all 20 slots) disagrees with games.csv side.
     """
     side_mismatches: int = 0
     meta_side_disagreements: int = 0
@@ -89,11 +89,11 @@ DRAFT_SIDE_ORDER = [
 
 
 def _sort_key(ev: dict):
-    """Sort key: (seq or infinity, occurredAt) so events with seq come first."""
+    """Sort key: (seq or infinity, occurredAt/played_at) so events with seq come first."""
     seq = ev.get("seq")
     if seq is None:
         seq = float("inf")
-    return (seq, ev.get("occurredAt", ""))
+    return (seq, ev.get("occurredAt") or ev.get("played_at", ""))
 
 
 def apply_undos(events: list[dict]) -> list[dict]:

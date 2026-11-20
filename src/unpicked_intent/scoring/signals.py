@@ -125,58 +125,23 @@ def build_evidence_rows(
         if row["meta_relevant"]:
             baseline_lookup[(row["patch"], row["champion"])] = row
 
-    # Build roster lookup: (game_id, team, character_name) -> player_id
-    roster_lookup: dict[tuple[str, str, str], str] = {}
-    for row in rosters_rows:
-        if row.get("title") == "lol" and row.get("participation_status") == "active":
-            key = (row["game_id"], row["team_id"], row["character_name"])
-            roster_lookup[key] = row["player_id"]
-
-    # Build player→champion history for pool check
+    # Build player→champion history for pool check and (game, team, role) -> players
     player_champ_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    game_team_role_players: dict[tuple[str, str, str], list[str]] = defaultdict(list)
     for row in rosters_rows:
         if row.get("title") == "lol" and row.get("participation_status") == "active":
-            player_champ_counts[row["player_id"]][row["character_name"]] += 1
+            pid = row["player_id"]
+            player_champ_counts[pid][row["character_name"]] += 1
+            if pid in player_roles:
+                role = player_roles[pid]["role"]
+                key = (row["game_id"], row["team_id"], role)
+                game_team_role_players[key].append(pid)
 
     # Build complete game set (non-Bo1, complete)
     complete_games: set[tuple[str, int]] = set()
     for flag in game_flags:
         if flag["is_complete"] and not flag["is_bo1"]:
             complete_games.add((flag["series_id"], flag["game_num"]))
-
-    # Build game_id -> (series_id, game_num) mapping from draft_events
-    game_id_to_series: dict[str, tuple[str, int]] = {}
-    for ev in draft_events:
-        gid = ev.get("game_id", "")
-        if gid:
-            game_id_to_series[gid] = (ev["series_id"], ev["game_num"])
-
-    # Build roster lookup by (series_id, game_num, team, champion) -> list of player_ids
-    # We need to join rosters on game_id, so build game_id from draft_events
-    roster_by_game_team_champ: dict[tuple[str, str, str], list[str]] = defaultdict(list)
-    for row in rosters_rows:
-        if row.get("title") == "lol" and row.get("participation_status") == "active":
-            key = (row["game_id"], row["team_id"], row["character_name"])
-            roster_by_game_team_champ[key].append(row["player_id"])
-
-    # For each game, build (team, role) -> list of player_ids
-    # A player's role in a game is their inferred role
-    game_team_role_players: dict[tuple[str, str, str], list[str]] = defaultdict(list)
-    for row in rosters_rows:
-        if row.get("title") == "lol" and row.get("participation_status") == "active":
-            pid = row["player_id"]
-            if pid in player_roles:
-                role = player_roles[pid]["role"]
-                key = (row["game_id"], row["team_id"], role)
-                game_team_role_players[key].append(pid)
-
-    # Build champion_game lookup by game_id
-    # champion_game has (series_id, game_num), need game_id
-    cg_by_game: dict[str, list[dict]] = defaultdict(list)
-    for row in champion_game_rows:
-        # Find game_id from series_id + game_num
-        # We need a reverse mapping
-        pass
 
     # Build series_id, game_num -> game_id mapping
     series_game_to_id: dict[tuple[str, int], str] = {}
@@ -279,10 +244,7 @@ def benjamini_hochberg(p_values: list[float]) -> list[float]:
         rank = i + 1  # 1-based rank
         orig_idx, p = indexed[i]
         q = p * m / rank
-        if q < prev_q:
-            prev_q = q
-        else:
-            prev_q = prev_q
+        prev_q = min(prev_q, q)
         q_values[orig_idx] = min(prev_q, 1.0)
 
     return q_values
@@ -408,7 +370,7 @@ def compute_early_ban(
     results: list[dict] = []
     for (team, champion), bans in bans_by_team_champ.items():
         n_bans = len(bans)
-        if n_bans < 4:
+        if n_bans < MIN_N:
             continue
 
         team_mean_slot = sum(b["slot"] for b in bans) / n_bans
@@ -457,7 +419,7 @@ def run_signals(grid_path: str) -> None:
         sys.exit(1)
 
     rosters_rows: list[dict] = []
-    with open(rosters_file, encoding="utf-8") as f:
+    with open(rosters_file, encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):
             rosters_rows.append(row)
 
@@ -465,7 +427,7 @@ def run_signals(grid_path: str) -> None:
     player_roles_file = DERIVED / "player_roles.csv"
     player_roles: dict[str, dict] = {}
     if player_roles_file.is_file():
-        with open(player_roles_file, encoding="utf-8") as f:
+        with open(player_roles_file, encoding="utf-8-sig", newline="") as f:
             for row in csv.DictReader(f):
                 player_roles[row["player_id"]] = {
                     "role": row["role"],

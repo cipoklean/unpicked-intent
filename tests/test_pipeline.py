@@ -1,7 +1,6 @@
 """Tests for ingest and pipeline stages using synthetic fixtures."""
 
 import csv
-import pytest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -515,7 +514,6 @@ class TestFlagGames:
         slotted, _ = assign_slots(folded)
         # Compute series game count before dropping
         series_game_count = {}
-        from collections import Counter
         for ev in slotted:
             sid = ev["series_id"]
             if sid not in series_game_count:
@@ -596,6 +594,17 @@ class TestSeqSorting:
             {"game_id": "G1", "action": "ban", "champion": "A", "team": "T1", "side": "blue", "seq": 1, "occurredAt": "2026-01-01T00:00:01Z"},
             {"game_id": "G1", "action": "undo-ban", "champion": "A", "team": "T1", "side": "blue", "seq": None, "occurredAt": "2026-01-01T00:00:02Z"},
             {"game_id": "G1", "action": "ban", "champion": "B", "team": "T2", "side": "red", "seq": 2, "occurredAt": "2026-01-01T00:00:03Z"},
+        ]
+        folded = apply_undos(events)
+        assert len(folded) == 1
+        assert folded[0]["champion"] == "B"
+
+    def test_sorts_by_played_at_when_occurred_at_absent(self):
+        """Events emitted by feeds.py carry played_at (not occurredAt) and tie-break by it."""
+        events = [
+            {"game_id": "G1", "action": "undo-ban", "champion": "A", "team": "T1", "side": "blue", "seq": 1, "played_at": "2026-01-01T00:00:02Z"},
+            {"game_id": "G1", "action": "ban", "champion": "A", "team": "T1", "side": "blue", "seq": 1, "played_at": "2026-01-01T00:00:01Z"},
+            {"game_id": "G1", "action": "ban", "champion": "B", "team": "T1", "side": "blue", "seq": 1, "played_at": "2026-01-01T00:00:03Z"},
         ]
         folded = apply_undos(events)
         assert len(folded) == 1
@@ -1404,7 +1413,7 @@ class TestBaseline:
 
     def test_mean_ban_slot_none_below_min_bans(self):
         """mean_ban_slot is None when total bans < MIN_BANS (10)."""
-        from unpicked_intent.scoring.baseline import compute_baseline, MIN_BANS
+        from unpicked_intent.scoring.baseline import compute_baseline
 
         # Only 5 bans for champ A — below MIN_BANS=10
         # Need at least one cg_row so the patch window is created
@@ -1446,7 +1455,7 @@ class TestBaseline:
 
     def test_meta_relevant_threshold(self):
         """meta_relevant = presence >= META_PRESENCE (0.10)."""
-        from unpicked_intent.scoring.baseline import compute_baseline, META_PRESENCE
+        from unpicked_intent.scoring.baseline import compute_baseline
 
         # 10 games, champ A appears in 1 → presence = 0.1 → meta_relevant
         cg_rows = []
@@ -1482,7 +1491,7 @@ class TestBaseline:
 
     def test_window_thick_stays_at_3_patches(self):
         """A window that already has 100+ games across 3 patches stays at 3 patches."""
-        from unpicked_intent.scoring.baseline import played_patch_windows, MIN_WINDOW_GAMES
+        from unpicked_intent.scoring.baseline import played_patch_windows
 
         # 5 patches, each with 50 games → 3 patches = 150 >= 100
         patches = ["16.10", "16.11", "16.12", "16.13", "16.14"]
@@ -1499,7 +1508,7 @@ class TestBaseline:
 
     def test_window_thin_extends(self):
         """A thin window extends backwards until it holds at least MIN_WINDOW_GAMES."""
-        from unpicked_intent.scoring.baseline import played_patch_windows, MIN_WINDOW_GAMES
+        from unpicked_intent.scoring.baseline import played_patch_windows
 
         # 5 patches: first 3 have 20 games each, last 2 have 40 each
         # Window for 16.12: [16.10, 16.11, 16.12] = 60 games < 100 → extends to include 16.9
@@ -1521,7 +1530,7 @@ class TestBaseline:
 
     def test_window_first_patches_stop_early(self):
         """At the very first patches, the window stops at what's available."""
-        from unpicked_intent.scoring.baseline import played_patch_windows, MIN_WINDOW_GAMES
+        from unpicked_intent.scoring.baseline import played_patch_windows
 
         # Only 2 patches, each with 30 games → total 60 < 100, but nothing more to extend
         patches = ["16.1", "16.2"]
@@ -1666,7 +1675,7 @@ class TestSignals:
 
     def test_left_open_drops_k_less_than_4(self):
         """Tells with k < MIN_N (4) are dropped."""
-        from unpicked_intent.scoring.signals import compute_left_open, MIN_N
+        from unpicked_intent.scoring.signals import compute_left_open
 
         evidence = [
             {"team": "T1", "player_id": "P1", "role": "top", "champion": "Aatrox",
@@ -1804,7 +1813,7 @@ class TestSignals:
 
     def test_evidence_excludes_champion_outside_pool(self):
         """A champion outside the player's pool (< POOL_MIN_GAMES) is excluded."""
-        from unpicked_intent.scoring.signals import build_evidence_rows, POOL_MIN_GAMES
+        from unpicked_intent.scoring.signals import build_evidence_rows
 
         # P1 plays Aatrox only once (< POOL_MIN_GAMES=3)
         rosters = [
@@ -1841,7 +1850,7 @@ class TestSignals:
 
     def test_evidence_includes_champion_in_pool(self):
         """A champion played ≥ POOL_MIN_GAMES is included."""
-        from unpicked_intent.scoring.signals import build_evidence_rows, POOL_MIN_GAMES
+        from unpicked_intent.scoring.signals import build_evidence_rows
 
         # P1 plays Aatrox 3 times (= POOL_MIN_GAMES)
         rosters = [
@@ -2451,3 +2460,98 @@ class TestSignals:
         assert name_map[("player", "P1")] == "AlphaTop"
         assert ("team", "V1") not in name_map
         assert ("player", "P_VAL") not in name_map
+
+    def test_run_baseline_honors_grid_path_argument(self):
+        """Passing grid_path directly to run_baseline() builds the DB first."""
+        import tempfile
+        import duckdb
+        import unpicked_intent.pipeline.build as build_mod
+        import unpicked_intent.scoring.baseline as baseline_mod
+        from tests.fixtures.create_synthetic import build_rich_synthetic_grid
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            grid = root / "grid"
+            build_rich_synthetic_grid(grid, team_a="T1", team_b="T2")
+
+            shared_derived = root / "derived"
+            shared_db = shared_derived / "unpicked.duckdb"
+
+            orig_build = (build_mod.DERIVED, build_mod.DB_PATH)
+            orig_bl = (baseline_mod.DERIVED, baseline_mod.DB_PATH)
+            try:
+                build_mod.DERIVED, build_mod.DB_PATH = shared_derived, shared_db
+                baseline_mod.DERIVED, baseline_mod.DB_PATH = shared_derived, shared_db
+
+                baseline_mod.run_baseline(str(grid))
+
+                assert shared_db.is_file()
+                con = duckdb.connect(str(shared_db), read_only=True)
+                try:
+                    bl_count = con.execute("SELECT COUNT(*) FROM baseline").fetchone()[0]
+                    assert bl_count > 0
+                finally:
+                    con.close()
+            finally:
+                build_mod.DERIVED, build_mod.DB_PATH = orig_build
+                baseline_mod.DERIVED, baseline_mod.DB_PATH = orig_bl
+
+    def test_run_all_orchestrates_full_pipeline_and_optional_export(self):
+        """pipeline.run_all runs build -> infer_players -> baseline -> signals -> export_static."""
+        import tempfile
+        import duckdb
+        import unpicked_intent.api.main as api_mod
+        import unpicked_intent.pipeline.build as build_mod
+        import unpicked_intent.pipeline.run_all as run_all_mod
+        import unpicked_intent.roles.infer_players as roles_mod
+        import unpicked_intent.scoring.baseline as baseline_mod
+        import unpicked_intent.scoring.signals as signals_mod
+        from tests.fixtures.create_synthetic import build_rich_synthetic_grid
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            grid = root / "grid"
+            build_rich_synthetic_grid(grid, team_a="47351", team_b="340")
+
+            shared_derived = root / "derived"
+            shared_db = shared_derived / "unpicked.duckdb"
+            out_dir = root / "dist"
+
+            orig_build = (build_mod.DERIVED, build_mod.DB_PATH)
+            orig_roles = (roles_mod.DERIVED, roles_mod.OVERRIDES_PATH, roles_mod.OUTPUT_PATH)
+            orig_bl = (baseline_mod.DERIVED, baseline_mod.DB_PATH)
+            orig_sig = (signals_mod.DERIVED, signals_mod.DB_PATH)
+            orig_api = (api_mod.DERIVED, api_mod.DB_PATH)
+
+            try:
+                build_mod.DERIVED, build_mod.DB_PATH = shared_derived, shared_db
+                roles_mod.DERIVED = shared_derived
+                roles_mod.OVERRIDES_PATH = shared_derived / "player_role_overrides.csv"
+                roles_mod.OUTPUT_PATH = shared_derived / "player_roles.csv"
+                baseline_mod.DERIVED, baseline_mod.DB_PATH = shared_derived, shared_db
+                signals_mod.DERIVED, signals_mod.DB_PATH = shared_derived, shared_db
+                api_mod.DERIVED, api_mod.DB_PATH = shared_derived, shared_db
+
+                rc = run_all_mod.main(["--grid", str(grid), "--out", str(out_dir)])
+                assert rc == 0
+
+                assert (shared_derived / "player_roles.csv").is_file()
+                assert shared_db.is_file()
+                assert (out_dir / "index.html").is_file()
+                assert (out_dir / "data" / "teams.json").is_file()
+                assert (out_dir / "data" / "self-scout.json").is_file()
+
+                con = duckdb.connect(str(shared_db), read_only=True)
+                try:
+                    for tbl in ("draft_events", "game_flags", "champion_game", "names",
+                                "baseline", "left_open", "early_ban"):
+                        cnt = con.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+                        assert cnt > 0, f"Expected non-empty {tbl}"
+                finally:
+                    con.close()
+            finally:
+                build_mod.DERIVED, build_mod.DB_PATH = orig_build
+                roles_mod.DERIVED, roles_mod.OVERRIDES_PATH, roles_mod.OUTPUT_PATH = orig_roles
+                baseline_mod.DERIVED, baseline_mod.DB_PATH = orig_bl
+                signals_mod.DERIVED, signals_mod.DB_PATH = orig_sig
+                api_mod.DERIVED, api_mod.DB_PATH = orig_api

@@ -1,9 +1,9 @@
 """Expected-behavior baseline — the fat layer.
 
-Keyed on (3-played-patch window x role), pooled across ALL regions
-(1,563 games). Region stays out of the key: LCS-only in a window is the
-same thin data we escaped; LCS rates are computed for display context
-only.
+Keyed on (played-patch window x role), where each window covers at least 3
+played patches and extends backwards until it holds >= MIN_WINDOW_GAMES (100)
+complete games, pooled across ALL regions (Bo1 included). Region stays out of
+the key: LCS-only in a window is the same thin data we escaped.
 
 'Played patch' means a patch with actual games — 16.5, 16.12, 16.13 have
 none (competitive skipped them). Build windows over the ordered list of
@@ -81,7 +81,6 @@ def played_patch_windows(
         window_games = sum(games_per_patch.get(wp, 0) for wp in window)
         while window_games < MIN_WINDOW_GAMES and start > 0:
             start -= 1
-            new_patch = unique_patches[start]
             window = unique_patches[start: i + 1]
             window_games = sum(games_per_patch.get(wp, 0) for wp in window)
 
@@ -237,6 +236,10 @@ def run_baseline(grid_path: str | None = None) -> None:
     """
     from unpicked_intent.roles.champion_roles import load
 
+    if grid_path:
+        from unpicked_intent.pipeline.build import run_pipeline
+        run_pipeline(grid_path)
+
     if not DB_PATH.exists():
         print(f"Database not found at {DB_PATH}. Run build first.")
         sys.exit(1)
@@ -333,11 +336,7 @@ def main() -> None:
     parser.add_argument("--grid", default=None, help="Path to GRID repo (runs build first if provided).")
     args = parser.parse_args()
 
-    if args.grid:
-        from unpicked_intent.pipeline.build import run_pipeline
-        run_pipeline(args.grid)
-
-    run_baseline()
+    run_baseline(args.grid)
 
 
 if __name__ == "__main__":

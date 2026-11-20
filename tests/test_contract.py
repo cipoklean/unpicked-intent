@@ -6,7 +6,7 @@ FIXTURE = Path(__file__).parent / "fixtures" / "synthetic_draft.jsonl"
 
 
 def test_fixture_conforms_to_draft_event_contract():
-    rows = [json.loads(l) for l in FIXTURE.read_text().splitlines() if l.strip()]
+    rows = [json.loads(line) for line in FIXTURE.read_text().splitlines() if line.strip()]
     required = {"series_id", "game_num", "slot", "phase", "side",
                 "team", "action", "champion", "patch", "league"}
     for r in rows:
@@ -17,6 +17,6 @@ def test_fixture_conforms_to_draft_event_contract():
 
 
 def test_hard_fearless_no_repeat_picks():
-    rows = [json.loads(l) for l in FIXTURE.read_text().splitlines() if l.strip()]
+    rows = [json.loads(line) for line in FIXTURE.read_text().splitlines() if line.strip()]
     picks = [r["champion"] for r in rows if r["action"] == "pick"]
     assert len(picks) == len(set(picks))

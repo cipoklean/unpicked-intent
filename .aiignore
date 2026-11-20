@@ -2,6 +2,7 @@
 # Feed data and derived artifacts never enter agent context.
 data/
 derived/
+dist/
 *.zst
 *.parquet
 *.duckdb

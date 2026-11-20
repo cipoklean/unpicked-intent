@@ -21,7 +21,7 @@ import csv
 import json
 import re
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import zstandard as zstd
@@ -32,7 +32,7 @@ class IngestStats:
     """Summary statistics returned by iter_draft_events.
 
     Attributes:
-        skipped_games: Number of events skipped because their game_id was
+        skipped_games: Number of unique games skipped because their game_id was
             not found in games.csv (abandoned or restarted drafts).
         events_read: Total number of draft events yielded.
     """

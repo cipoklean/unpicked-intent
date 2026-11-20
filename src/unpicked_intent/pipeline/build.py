@@ -294,7 +294,7 @@ def run_pipeline(grid_path: str) -> None:
     con = duckdb.connect(str(DB_PATH))
 
     # Run schema
-    schema_text = SCHEMA_SQL.read_text()
+    schema_text = SCHEMA_SQL.read_text(encoding="utf-8")
     con.execute(schema_text)
 
     # Write draft_events (complete games only)

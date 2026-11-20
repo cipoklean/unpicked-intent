@@ -28,6 +28,9 @@ dist/
 # synthetic fixtures only:
 !tests/fixtures/
 !tests/fixtures/**
+# Keep Python bytecode ignored even under negated fixture paths:
+**/__pycache__/
+**/*.py[cod]
 # =====================================================
 
 # NOTE: .idea/ and .junie/ are committed ON PURPOSE
