@@ -11,6 +11,7 @@ from unpicked_intent.pipeline.normalize import (
     check_completeness,
     flag_games,
     NormalizeStats,
+    DRAFT_SIDE_ORDER,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -65,6 +66,7 @@ class TestIterDraftEvents:
             assert ev["patch"] == "16.20"
             assert ev["game_num"] in (1, 2)
             assert ev["side"] in ("blue", "red")
+            assert "meta_side" in ev
 
     def test_resolves_game_id_from_series_state_delta(self):
         """game_id comes from seriesStateDelta.games[0].id, not a flat gameId key."""
@@ -88,8 +90,9 @@ class TestIterDraftEvents:
         game_ids = {ev["game_id"] for ev in events}
         assert "G_ABANDONED" not in game_ids
         assert stats.skipped_games == 1
-        # G3 events should still be present
+        # G3 and G4 events should still be present
         assert "G3" in game_ids
+        assert "G4" in game_ids
 
     def test_no_skipped_count_in_stream(self):
         """The event stream no longer contains _skipped_count summary dicts."""
@@ -174,7 +177,7 @@ class TestCrossSeriesGameNum:
         assert picks3 == 10
 
     def test_completeness_separates_same_game_num(self):
-        """check_completeness drops G2 (incomplete) but keeps G1 and G3."""
+        """check_completeness drops G2 (incomplete) but keeps G1, G3, and G4."""
         events2, _ = _load_all()
         events3, _ = _load_all3()
         all_events = events2 + events3
@@ -185,6 +188,7 @@ class TestCrossSeriesGameNum:
         kept_game_ids = {e["game_id"] for e in kept}
         assert "G1" in kept_game_ids
         assert "G3" in kept_game_ids
+        assert "G4" in kept_game_ids
         assert "G2" not in kept_game_ids
 
 
@@ -316,15 +320,69 @@ class TestAssignSlots:
         assert hasattr(stats, "side_mismatches")
 
     def test_side_mismatch_count(self):
-        """Side mismatches are counted when team side doesn't match draft order."""
-        # Create events where a red team acts at a blue slot
+        """Side mismatches are counted when derived side doesn't match draft order."""
+        # T1 acts at seq 1, so T1 is blue by derivation.
+        # Seq 1 expects blue (T1=blue ✓), seq 2 expects red (T2=red ✓).
+        # No mismatches when sides are correct.
         events = [
-            {"game_id": "G1", "action": "ban", "champion": "A", "team": "T1", "side": "red", "seq": 1, "occurredAt": "2026-01-01T00:00:01Z"},
-            {"game_id": "G1", "action": "ban", "champion": "B", "team": "T2", "side": "blue", "seq": 2, "occurredAt": "2026-01-01T00:00:02Z"},
+            {"game_id": "G1", "action": "ban", "champion": "A", "team": "T1", "side": "blue", "meta_side": "blue", "seq": 1, "occurredAt": "2026-01-01T00:00:01Z"},
+            {"game_id": "G1", "action": "ban", "champion": "B", "team": "T2", "side": "red", "meta_side": "red", "seq": 2, "occurredAt": "2026-01-01T00:00:02Z"},
         ]
         _, stats = assign_slots(events)
-        # Seq 1 expects blue, got red. Seq 2 expects red, got blue. 2 mismatches.
-        assert stats.side_mismatches == 2
+        assert stats.side_mismatches == 0
+
+    def test_draft_side_order_slots_13_20(self):
+        """DRAFT_SIDE_ORDER slots 13-20: ban2 R B R B, pick2 R B B R."""
+        assert DRAFT_SIDE_ORDER[12] == "red"   # 13
+        assert DRAFT_SIDE_ORDER[13] == "blue"  # 14
+        assert DRAFT_SIDE_ORDER[14] == "red"   # 15
+        assert DRAFT_SIDE_ORDER[15] == "blue"  # 16
+        assert DRAFT_SIDE_ORDER[16] == "red"   # 17
+        assert DRAFT_SIDE_ORDER[17] == "blue"  # 18
+        assert DRAFT_SIDE_ORDER[18] == "blue"  # 19
+        assert DRAFT_SIDE_ORDER[19] == "red"   # 20
+
+    def test_side_derived_from_draft(self):
+        """Side is derived from draft: team at seq 1 is blue."""
+        events = [
+            {"game_id": "G1", "action": "ban", "champion": "A", "team": "T1", "side": "blue", "meta_side": "blue", "seq": 1, "occurredAt": "2026-01-01T00:00:01Z"},
+            {"game_id": "G1", "action": "ban", "champion": "B", "team": "T2", "side": "red", "meta_side": "red", "seq": 2, "occurredAt": "2026-01-01T00:00:02Z"},
+        ]
+        slotted, _ = assign_slots(events)
+        # T1 acts at seq 1 → derived blue; T2 → derived red
+        assert slotted[0]["side"] == "blue"
+        assert slotted[1]["side"] == "red"
+
+    def test_meta_side_disagreement(self):
+        """meta_side_disagreements counted when games.csv side differs from draft-derived side."""
+        # T1 acts at seq 1 → derived blue, but meta_side says red (swapped)
+        events = [
+            {"game_id": "G1", "action": "ban", "champion": "A", "team": "T1", "side": "red", "meta_side": "red", "seq": 1, "occurredAt": "2026-01-01T00:00:01Z"},
+            {"game_id": "G1", "action": "ban", "champion": "B", "team": "T2", "side": "blue", "meta_side": "blue", "seq": 2, "occurredAt": "2026-01-01T00:00:02Z"},
+        ]
+        slotted, stats = assign_slots(events)
+        # T1 at seq 1 → derived blue, but meta_side=red → disagreement
+        assert stats.meta_side_disagreements == 1
+        # Derived side should be blue for T1 (from draft), not red (from games.csv)
+        assert slotted[0]["side"] == "blue"
+
+    def test_meta_side_disagreement_from_fixture(self):
+        """G4 has swapped sides in games.csv: meta_side_disagreements should be 1."""
+        events, _ = _load_all3()
+        folded = apply_undos(events)
+        slotted, stats = assign_slots(folded)
+        # G3: T3 at seq 1, meta_side=blue → no disagreement
+        # G4: T3 at seq 1, meta_side=red → disagreement (T3 derived blue, meta says red)
+        # G_ABANDONED: skipped by ingest, not in events
+        assert stats.meta_side_disagreements == 1
+
+    def test_zero_side_mismatches_with_correct_order(self):
+        """With corrected DRAFT_SIDE_ORDER and derived sides, real-style drafts have 0 mismatches."""
+        events, _ = _load_all()
+        folded = apply_undos(events)
+        slotted, stats = assign_slots(folded)
+        # G1 and G2 use correct draft order with derived sides
+        assert stats.side_mismatches == 0
 
     def test_no_unknown_phase(self):
         """With valid seq 1-20, no event gets 'unknown' phase."""
@@ -383,6 +441,55 @@ class TestFlagGames:
         flags = flag_games(slotted)
         for f in flags:
             assert f["is_bo1"] is False  # SYN-2 has 2 games
+
+    def test_flags_bo1_with_incomplete_dropped(self):
+        """When incomplete game is dropped, series_game_count keeps is_bo1 correct."""
+        events, _ = _load_all()
+        folded = apply_undos(events)
+        slotted, _ = assign_slots(folded)
+        # Compute series game count before dropping
+        series_game_count = {}
+        from collections import Counter
+        for ev in slotted:
+            sid = ev["series_id"]
+            if sid not in series_game_count:
+                series_game_count[sid] = set()
+            series_game_count[sid].add(ev["game_id"])
+        series_game_count = {k: len(v) for k, v in series_game_count.items()}
+        # Drop incomplete game
+        kept, dropped = check_completeness(slotted)
+        assert dropped == 1  # G2 dropped
+        # Without series_game_count, G1 would appear as Bo1 (only game left)
+        flags_without = flag_games(kept)
+        g1_flag_without = next(f for f in flags_without if f["game_id"] == "G1")
+        assert g1_flag_without["is_bo1"] is True  # wrong — only 1 game in kept
+        # With series_game_count, G1 correctly sees 2 games in series
+        flags_with = flag_games(kept, series_game_count=series_game_count)
+        g1_flag_with = next(f for f in flags_with if f["game_id"] == "G1")
+        assert g1_flag_with["is_bo1"] is False  # correct — 2 games in series
+
+    def test_fearless_with_incomplete_dropped(self):
+        """Fearless status uses pre-drop game count, not post-drop."""
+        events, _ = _load_all()
+        folded = apply_undos(events)
+        slotted, _ = assign_slots(folded)
+        # Compute series game count before dropping
+        series_game_count = {}
+        for ev in slotted:
+            sid = ev["series_id"]
+            if sid not in series_game_count:
+                series_game_count[sid] = set()
+            series_game_count[sid].add(ev["game_id"])
+        series_game_count = {k: len(v) for k, v in series_game_count.items()}
+        kept, _ = check_completeness(slotted)
+        # Without series_game_count: only G1 remains → ambiguous
+        flags_without = flag_games(kept)
+        g1_flag_without = next(f for f in flags_without if f["game_id"] == "G1")
+        assert g1_flag_without["fearless_status"] == "ambiguous"
+        # With series_game_count: 2 games in series → hard (no repeats)
+        flags_with = flag_games(kept, series_game_count=series_game_count)
+        g1_flag_with = next(f for f in flags_with if f["game_id"] == "G1")
+        assert g1_flag_with["fearless_status"] == "hard"
 
     def test_fearless_status(self):
         """Multi-game series with no repeats is flagged as hard Fearless."""

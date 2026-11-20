@@ -31,8 +31,11 @@ class NormalizeStats:
     Attributes:
         side_mismatches: Number of events whose acting team's side did not
             match the standard pro draft order for that slot.
+        meta_side_disagreements: Number of games where the derived side
+            (from draft, team at seq 1 = blue) disagrees with games.csv side.
     """
     side_mismatches: int = 0
+    meta_side_disagreements: int = 0
 
 
 def _phase_from_seq(seq: int) -> str:
@@ -56,7 +59,7 @@ def _phase_from_seq(seq: int) -> str:
 
 
 # Standard pro draft side order for slots 1-20.
-# Used to verify the acting team's side matches expectations.
+# Confirmed on real data: blue always acts at seq 1.
 DRAFT_SIDE_ORDER = [
     # ban1: slots 1-6
     "blue",  # 1
@@ -73,15 +76,15 @@ DRAFT_SIDE_ORDER = [
     "blue",  # 11
     "red",   # 12
     # ban2: slots 13-16
-    "blue",  # 13
-    "red",   # 14
-    "blue",  # 15
-    "red",   # 16
+    "red",   # 13
+    "blue",  # 14
+    "red",   # 15
+    "blue",  # 16
     # pick2: slots 17-20
-    "blue",  # 17
-    "red",   # 18
-    "red",   # 19
-    "blue",  # 20
+    "red",   # 17
+    "blue",  # 18
+    "blue",  # 19
+    "red",   # 20
 ]
 
 
@@ -149,8 +152,12 @@ def assign_slots(events: list[dict]) -> tuple[list[dict], NormalizeStats]:
     GRID's sequenceNumber is the draft slot (1-20).  An undo carries the
     same seq as the action it undoes.  Slot = seq, phase = _phase_from_seq(seq).
 
-    Also checks that the acting team's side matches the standard pro draft
-    order for that slot and counts mismatches.
+    Derives each team's side from the draft itself: the team acting at seq 1
+    is blue, the other is red.  Stores the games.csv side as meta_side and
+    counts disagreements between derived side and meta_side.
+
+    Also checks that the acting team's derived side matches the standard pro
+    draft order for that slot and counts mismatches.
 
     Returns:
         A tuple of (events with slot/phase assigned, NormalizeStats).
@@ -163,18 +170,48 @@ def assign_slots(events: list[dict]) -> tuple[list[dict], NormalizeStats]:
     result = []
     for game_id in sorted(by_game.keys()):
         game_events = sorted(by_game[game_id], key=_sort_key)
+
+        # Derive side from draft: team acting at seq 1 is blue
+        blue_team = None
+        for ev in game_events:
+            if ev.get("seq") == 1:
+                blue_team = ev["team"]
+                break
+
+        # Build team -> derived side mapping
+        team_side: dict[str, str] = {}
+        meta_side_mismatch = False
+        if blue_team is not None:
+            for ev in game_events:
+                tid = ev["team"]
+                if tid not in team_side:
+                    if tid == blue_team:
+                        team_side[tid] = "blue"
+                    else:
+                        team_side[tid] = "red"
+                    # Check against meta_side from games.csv
+                    meta_side = ev.get("meta_side")
+                    if meta_side is not None and team_side[tid] != meta_side:
+                        meta_side_mismatch = True
+
+        if meta_side_mismatch:
+            stats.meta_side_disagreements += 1
+
         for ev in game_events:
             action = ev["action"]
             if action in ("ban", "pick"):
                 seq = ev.get("seq")
                 if seq is not None:
                     phase = _phase_from_seq(seq)
+                    # Use derived side
+                    derived_side = team_side.get(ev["team"], ev.get("side", "blue"))
                     # Check side mismatch against standard draft order
                     if 1 <= seq <= len(DRAFT_SIDE_ORDER):
                         expected_side = DRAFT_SIDE_ORDER[seq - 1]
-                        if ev["side"] != expected_side:
+                        if derived_side != expected_side:
                             stats.side_mismatches += 1
                     ev = dict(ev)
+                    ev["side"] = derived_side
                     ev["slot"] = seq
                     ev["phase"] = phase
                     result.append(ev)
@@ -214,8 +251,17 @@ def check_completeness(events: list[dict]) -> tuple[list[dict], int]:
     return kept, dropped
 
 
-def flag_games(events: list[dict]) -> list[dict]:
+def flag_games(events: list[dict], *, series_game_count: dict[str, int] | None = None) -> list[dict]:
     """Compute game_flags rows: completeness, bo1, fearless_status.
+
+    Args:
+        events: List of draft events (may be after incomplete games dropped).
+        series_game_count: Optional dict mapping series_id -> total game count
+            in the series, computed *before* dropping incomplete games.  If
+            provided, is_bo1 and fearless_status use this count so that a
+            multi-game series doesn't become a fake Bo1 when one game is
+            incomplete.  If not provided, falls back to counting games from
+            the events list (legacy behavior).
 
     Returns a list of dicts, one per game, with keys:
         series_id, game_id, game_num, is_complete, is_bo1, fearless_status
@@ -240,11 +286,16 @@ def flag_games(events: list[dict]) -> list[dict]:
         picks = sum(1 for e in game_events if e["action"] == "pick")
         is_complete = bans == 10 and picks == 10
 
-        num_games_in_series = len(series_games[series_id])
+        # Use provided series game count (before dropping) if available,
+        # otherwise fall back to counting from events
+        if series_game_count is not None:
+            num_games_in_series = series_game_count.get(series_id, len(series_games[series_id]))
+        else:
+            num_games_in_series = len(series_games[series_id])
         is_bo1 = num_games_in_series == 1
 
         # Fearless detection: check for champion repeats across series games
-        fearless_status = _detect_fearless(series_id, series_games[series_id], by_game)
+        fearless_status = _detect_fearless(series_id, series_games[series_id], by_game, num_games_in_series)
 
         flags.append({
             "series_id": series_id,
@@ -259,15 +310,23 @@ def flag_games(events: list[dict]) -> list[dict]:
 
 
 def _detect_fearless(
-    series_id: str, game_ids: set[str], by_game: dict[str, list[dict]]
+    series_id: str, game_ids: set[str], by_game: dict[str, list[dict]],
+    num_games_in_series: int = 0,
 ) -> str:
     """Detect Fearless draft status for a series.
 
     - 'none': a champion was picked twice in the series (not Fearless)
     - 'hard': no repeats found in a multi-game series (proven Fearless)
     - 'ambiguous': single-game series (can't determine)
+
+    Args:
+        num_games_in_series: Total game count from the series (before dropping
+            incomplete games).  Used to determine whether the series is
+            multi-game even when some games are missing from by_game.
     """
-    if len(game_ids) <= 1:
+    # Use the provided count if available, otherwise fall back to by_game keys
+    total_games = num_games_in_series if num_games_in_series else len(game_ids)
+    if total_games <= 1:
         return "ambiguous"
 
     # Collect all picked champions across all games in the series

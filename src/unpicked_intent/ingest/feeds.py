@@ -178,7 +178,8 @@ def iter_draft_events(feed_path: str, games_csv_path: str = "") -> tuple[Iterato
                         "game_num": game_number,
                         "slot": 0,  # assigned in normalize.py
                         "phase": "",  # assigned in normalize.py
-                        "side": side,
+                        "side": side,  # derived in normalize.py from draft
+                        "meta_side": side,  # side from games.csv, for disagreement check
                         "team": team_id,
                         "action": action,
                         "champion": champion,

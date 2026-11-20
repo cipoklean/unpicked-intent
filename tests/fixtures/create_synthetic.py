@@ -44,7 +44,7 @@ def _make_complete_game_events(game_id, team_blue, team_red, champions_bans, cha
 
     Args:
         game_id: unique game identifier
-        team_blue: team ID on blue side
+        team_blue: team ID on blue side (acts at seq 1)
         team_red: team ID on red side
         champions_bans: list of 10 champion names for bans
         champions_picks: list of 10 champion names for picks
@@ -69,15 +69,15 @@ def _make_complete_game_events(game_id, team_blue, team_red, champions_bans, cha
         pick_idx += 1
         seq += 1
 
-    # ban2: blue, red, blue, red (4 bans)
-    for side in ["blue", "red", "blue", "red"]:
+    # ban2: red, blue, red, blue (4 bans) — corrected order
+    for side in ["red", "blue", "red", "blue"]:
         team = team_blue if side == "blue" else team_red
         events.append(_make_event("team-banned-character", team, champions_bans[ban_idx], game_id, seq=seq))
         ban_idx += 1
         seq += 1
 
-    # pick2: blue, red, red, blue (4 picks)
-    for side in ["blue", "red", "red", "blue"]:
+    # pick2: red, blue, blue, red (4 picks) — corrected order
+    for side in ["red", "blue", "blue", "red"]:
         team = team_blue if side == "blue" else team_red
         events.append(_make_event("team-picked-character", team, champions_picks[pick_idx], game_id, seq=seq))
         pick_idx += 1
@@ -124,19 +124,27 @@ def create_synthetic_feed():
     # After folding: Kalista ban removed, Garen pick removed, Lee Sin remains.
     # 10 bans + 10 picks. Good.
 
-    # ---- SYN-2: Game 2 (G2) — incomplete draft ----
+    # ---- SYN-2: Game 2 (G2) — incomplete draft (5 bans + 5 picks) ----
+    # Uses correct draft side order: ban1 blue,red,blue,red,blue (seq 1-5)
+    # pick1 blue,red,red,blue,blue (seq 7-11)
     game2_events = [
         _make_event("team-banned-character", "T1", "Ryze", "G2", seq=1),
         _make_event("team-banned-character", "T2", "Sion", "G2", seq=2),
         _make_event("team-banned-character", "T1", "Sivir", "G2", seq=3),
         _make_event("team-banned-character", "T2", "Annie", "G2", seq=4),
         _make_event("team-banned-character", "T1", "Nunu & Willump", "G2", seq=5),
-        _make_event("team-picked-character", "T1", "Aatrox", "G2", seq=6),
-        _make_event("team-picked-character", "T2", "Camille", "G2", seq=7),
-        _make_event("team-picked-character", "T2", "Hecarim", "G2", seq=8),
-        _make_event("team-picked-character", "T1", "Fiora", "G2", seq=9),
-        _make_event("team-picked-character", "T1", "Braum", "G2", seq=10),
+        _make_event("team-picked-character", "T1", "Aatrox", "G2", seq=7),
+        _make_event("team-picked-character", "T2", "Camille", "G2", seq=8),
+        _make_event("team-picked-character", "T2", "Hecarim", "G2", seq=9),
+        _make_event("team-picked-character", "T1", "Fiora", "G2", seq=10),
+        _make_event("team-picked-character", "T1", "Braum", "G2", seq=11),
     ]
+
+    # ---- SYN-3: Game 4 (G4) — complete draft, sides swapped in games.csv ----
+    # T3 acts at seq 1 (so T3 is blue by draft), but games.csv says T3=red, T4=blue
+    g4_bans = ["Ryze", "Sion", "Sivir", "Annie", "Nunu & Willump", "Aatrox", "Camille", "Hecarim", "Fiora", "Braum"]
+    g4_picks = ["Kalista", "K'Sante", "Azir", "Viktor", "Orianna", "Syndra", "LeBlanc", "Ahri", "Yasuo", "Zed"]
+    game4_events = _make_complete_game_events("G4", "T3", "T4", g4_bans, g4_picks)
 
     # ---- SYN-3: Game 3 (G3) — complete draft, game_num=1 (same as G1) ----
     g3_bans = ["Ryze", "Sion", "Sivir", "Annie", "Nunu & Willump", "Aatrox", "Camille", "Hecarim", "Fiora", "Braum"]
@@ -162,6 +170,7 @@ def create_synthetic_feed():
     # ---- Write SYN-3 feed ----
     syn3_envelopes = [
         {"occurredAt": "2026-11-02T10:00:00Z", "events": game3_events},
+        {"occurredAt": "2026-11-02T10:30:00Z", "events": game4_events},
         {"occurredAt": "2026-11-02T11:00:00Z", "events": abandoned_events},
     ]
     feed_path3 = FIXTURES / "events_SYN-3_grid.jsonl.zst"
@@ -171,13 +180,15 @@ def create_synthetic_feed():
 
     # ---- Write shared games.csv ----
     # SYN-2: G1 (game_num=1), G2 (game_num=2)
-    # SYN-3: G3 (game_num=1, same as G1!), G_ABANDONED not listed
+    # SYN-3: G3 (game_num=1, same as G1!), G4 (game_num=2, sides swapped!)
+    # G_ABANDONED not listed
     games_csv = FIXTURES / "games.csv"
     games_csv.write_text(
         "series_id,game_id,game_number,patch,team1_id,team1_side,team2_id,team2_side\n"
         "SYN-2,G1,1,16.20,T1,blue,T2,red\n"
         "SYN-2,G2,2,16.20,T1,blue,T2,red\n"
         "SYN-3,G3,1,16.20,T3,blue,T4,red\n"
+        "SYN-3,G4,2,16.20,T3,red,T4,blue\n"
     )
 
     print(f"Created {feed_path}, {feed_path3}, and {games_csv}")

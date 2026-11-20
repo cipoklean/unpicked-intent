@@ -2,3 +2,4 @@ series_id,game_id,game_number,patch,team1_id,team1_side,team2_id,team2_side
 SYN-2,G1,1,16.20,T1,blue,T2,red
 SYN-2,G2,2,16.20,T1,blue,T2,red
 SYN-3,G3,1,16.20,T3,blue,T4,red
+SYN-3,G4,2,16.20,T3,red,T4,blue
