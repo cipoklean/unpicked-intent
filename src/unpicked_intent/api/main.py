@@ -15,11 +15,13 @@ from pathlib import Path
 
 import duckdb
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 
 # DERIVED is the repo root's derived/ folder (next to pyproject.toml).
 # src/unpicked_intent/api/main.py → parents[3] = repo root.
 DERIVED = Path(__file__).resolve().parents[3] / "derived"
 DB_PATH = DERIVED / "unpicked.duckdb"
+WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 
 # Target LCS teams listed first in /teams (in this order):
 # FlyQuest, Team Liquid, LYON, Shopify Rebellion, Disguised, Dignitas, Sentinels, Cloud9 Kia
@@ -216,3 +218,8 @@ def silence_report(team_id: str) -> dict:
 def self_scout() -> dict:
     """Return the Silence Report for Cloud9 Kia (team 47351)."""
     return _get_silence_report(SELF_SCOUT_TEAM_ID)
+
+
+# Mount the plain HTML/CSS/JS Silence Report UI at / AFTER all API routes so
+# /health, /teams, /silence/{team_id}, and /self-scout always match first.
+app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")

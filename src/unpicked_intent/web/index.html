@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Unpicked Intent — Fearless Draft Silence Report</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Top Tactical Bar -->
+    <header class="topbar">
+      <div class="topbar-brand">
+        <svg class="brand-mark" width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <rect x="2" y="2" width="20" height="20" rx="3" stroke="currentColor" stroke-width="1.5" opacity="0.45" />
+          <path d="M7 7H17V17H7V7Z" stroke="currentColor" stroke-width="1.5" stroke-dasharray="3 2" />
+          <rect x="10" y="10" width="4" height="4" fill="currentColor" />
+        </svg>
+        <div class="brand-text">
+          <span class="brand-name">UNPICKED INTENT</span>
+          <span class="brand-sub">Fearless Draft Silence Scouting</span>
+        </div>
+      </div>
+
+      <div class="topbar-controls">
+        <span id="db-status-pill" class="status-pill" aria-live="polite">Loading…</span>
+
+        <button
+          id="self-scout-toggle"
+          type="button"
+          class="self-scout-btn"
+          role="switch"
+          aria-checked="false"
+          title="Switch to Cloud9 Kia self-scout view"
+        >
+          <span class="switch-track" aria-hidden="true">
+            <span class="switch-thumb"></span>
+          </span>
+          <span class="self-scout-label">
+            <span class="self-scout-title">Self-scout: Cloud9 Kia</span>
+            <span class="self-scout-hint">What opponents read about us</span>
+          </span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Two-Pane Workspace -->
+    <div class="workspace">
+      <!-- Left Rail: Team Picker -->
+      <aside class="team-rail" aria-label="Team picker">
+        <div class="rail-header">
+          <div class="rail-title-row">
+            <h2 class="rail-title">Teams</h2>
+            <span id="team-count-badge" class="mono-muted">0</span>
+          </div>
+          <label class="search-box" aria-label="Filter teams">
+            <span class="search-icon" aria-hidden="true">/</span>
+            <input
+              id="team-search"
+              type="search"
+              placeholder="Filter teams…"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </label>
+          <div class="rail-col-legend">
+            <span>Team</span>
+            <span>Tells / Bans</span>
+          </div>
+        </div>
+
+        <nav id="team-list" class="team-list" aria-label="Teams list">
+          <div class="rail-placeholder">Loading teams…</div>
+        </nav>
+      </aside>
+
+      <!-- Right Pane: Silence Report -->
+      <main id="report-pane" class="report-pane" tabindex="-1">
+        <!-- Self-Scout Reframe Banner (hidden in opponent mode) -->
+        <section id="self-scout-banner" class="self-scout-banner hidden" aria-label="Self-scout context">
+          <div class="self-scout-banner-tag">SELF-SCOUT · MIRROR VIEW</div>
+          <div class="self-scout-banner-copy">
+            <strong>What opponents can read about us.</strong>
+            <span>
+              This is the exact Fearless Draft Silence Report opposing coaches see for Cloud9 Kia —
+              highlighting open champions we repeatedly pass and bans we commit earlier than the meta.
+            </span>
+          </div>
+        </section>
+
+        <!-- Dynamic State Container (Loading / 503 / 404 / Report) -->
+        <div id="state-panel" class="state-panel hidden" role="status" aria-live="polite"></div>
+
+        <div id="report-content" class="report-content hidden">
+          <!-- Report Header -->
+          <section class="report-header">
+            <div class="report-title-block">
+              <div class="report-mode-eyebrow" id="report-mode-eyebrow">OPPONENT SILENCE REPORT</div>
+              <h1 id="report-team-name" class="report-team-name">—</h1>
+            </div>
+
+            <div class="kpi-strip" aria-label="Report summary counts">
+              <div class="kpi-chip kpi-strong">
+                <span class="kpi-label">Strong tells (q &lt; 0.2)</span>
+                <span id="kpi-strong-count" class="kpi-value">0</span>
+              </div>
+              <div class="kpi-chip kpi-lead">
+                <span class="kpi-label">Leads (q &ge; 0.2)</span>
+                <span id="kpi-lead-count" class="kpi-value">0</span>
+              </div>
+              <div class="kpi-chip">
+                <span class="kpi-label">Early-ban entries (n &ge; 4)</span>
+                <span id="kpi-early-ban-count" class="kpi-value">0</span>
+              </div>
+            </div>
+          </section>
+
+          <!-- Honesty & Signal Legend Strip -->
+          <section class="honesty-bar" aria-label="Statistical methodology and honesty rules">
+            <div class="honesty-note">
+              <span class="honesty-dot" aria-hidden="true"></span>
+              <span id="report-min-n-note">Only tells with at least 4 qualifying games are shown.</span>
+            </div>
+            <div class="honesty-explainer">
+              <span class="badge-mini badge-strong">STRONG</span>
+              <span class="badge-mini badge-lead">LEAD</span>
+              <span>
+                Leads are patterns worth watching; strong tells survive correction for testing thousands of patterns.
+              </span>
+            </div>
+          </section>
+
+          <!-- Section 1: Recommended Actions -->
+          <section class="panel actions-panel" aria-labelledby="actions-heading">
+            <div class="panel-header">
+              <div>
+                <h2 id="actions-heading" class="panel-title">Recommended Actions</h2>
+                <p id="actions-subtitle" class="panel-sub">
+                  Draft prep takeaways written strictly from ranked tells and early-ban slot averages.
+                </p>
+              </div>
+            </div>
+            <ul id="actions-list" class="actions-list"></ul>
+          </section>
+
+          <!-- Section 2: Left-Open Tells -->
+          <section class="panel tells-panel" aria-labelledby="tells-heading">
+            <div class="panel-header tells-header">
+              <div>
+                <h2 id="tells-heading" class="panel-title">Left-Open Tells</h2>
+                <p class="panel-sub">
+                  Ranked by p-value ascending. Every row shows qualifying open games (n), observed picks, and meta-window expectation.
+                </p>
+              </div>
+              <span id="tells-showing-count" class="showing-count">0 tells</span>
+            </div>
+
+            <!-- Filter & Grouping Bar -->
+            <div class="filter-toolbar" role="region" aria-label="Filter left-open tells">
+              <div id="role-pills" class="pill-group" role="group" aria-label="Filter by role"></div>
+
+              <div class="toolbar-right">
+                <label class="select-wrap" for="player-filter">
+                  <span class="select-label">Player</span>
+                  <select id="player-filter">
+                    <option value="all">All players</option>
+                  </select>
+                </label>
+
+                <div id="tier-pills" class="pill-group compact-pills" role="group" aria-label="Filter by signal tier">
+                  <button type="button" class="pill active" data-tier="all">All</button>
+                  <button type="button" class="pill" data-tier="strong">Strong</button>
+                  <button type="button" class="pill" data-tier="lead">Leads</button>
+                </div>
+
+                <div id="group-pills" class="pill-group compact-pills" role="group" aria-label="Group tells">
+                  <button type="button" class="pill active" data-group="flat">Ranked</button>
+                  <button type="button" class="pill" data-group="role">By Role</button>
+                  <button type="button" class="pill" data-group="player">By Player</button>
+                </div>
+              </div>
+            </div>
+
+            <div id="tells-container" class="tells-container"></div>
+          </section>
+
+          <!-- Section 3: Early-Ban Pressure -->
+          <section class="panel bans-panel" aria-labelledby="bans-heading">
+            <div class="panel-header bans-header">
+              <div>
+                <h2 id="bans-heading" class="panel-title">Early-Ban Pressure</h2>
+                <p class="panel-sub">
+                  Team mean ban slot vs. meta baseline (slots 1–20: Ban 1 is 1–6, Ban 2 is 13–16). Positive delta means banned earlier than the meta.
+                </p>
+              </div>
+
+              <div class="bans-controls">
+                <label class="checkbox-toggle">
+                  <input id="early-only-toggle" type="checkbox" />
+                  <span>Earlier than meta only (&Delta; &gt; 0)</span>
+                </label>
+                <label class="mini-search" aria-label="Filter early bans by champion">
+                  <input
+                    id="ban-search"
+                    type="search"
+                    placeholder="Filter champion…"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                </label>
+              </div>
+            </div>
+
+            <div id="early-ban-container" class="table-scroll"></div>
+          </section>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

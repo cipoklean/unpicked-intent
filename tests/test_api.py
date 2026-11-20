@@ -7,11 +7,13 @@ pipeline and exercises all endpoints using FastAPI's TestClient.
 from __future__ import annotations
 
 import csv
+import re
 import tempfile
 from pathlib import Path
 
 import duckdb
 import pytest
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 import unpicked_intent.api.main as api_mod
@@ -245,3 +247,78 @@ class TestApi:
 
         assert len(seen_kwargs) == 3
         assert all(kw.get("read_only") is True for kw in seen_kwargs)
+
+
+class TestWebUI:
+    """TestClient suite for the static Silence Report web UI and JS endpoint contract."""
+
+    def test_root_serves_index_html_offline(self):
+        client = TestClient(api_mod.app)
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers.get("content-type", "")
+        html = resp.text
+
+        assert "UNPICKED INTENT" in html
+        assert "Self-scout: Cloud9 Kia" in html
+        assert "Only tells with at least 4 qualifying games are shown." in html
+        assert (
+            "Leads are patterns worth watching; strong tells survive correction "
+            "for testing thousands of patterns."
+        ) in html
+        assert 'href="/styles.css"' in html
+        assert 'src="/app.js"' in html
+
+        # Must work completely offline (no external CDN URLs)
+        assert "http://" not in html
+        assert "https://" not in html
+
+    def test_static_assets_load_and_are_offline(self):
+        client = TestClient(api_mod.app)
+
+        css_resp = client.get("/styles.css")
+        assert css_resp.status_code == 200
+        assert "text/css" in css_resp.headers.get("content-type", "")
+        assert len(css_resp.text) > 100
+        assert "http://" not in css_resp.text
+        assert "https://" not in css_resp.text
+
+        js_resp = client.get("/app.js")
+        assert js_resp.status_code == 200
+        assert "javascript" in js_resp.headers.get("content-type", "")
+        assert len(js_resp.text) > 100
+        assert "http://" not in js_resp.text
+        assert "https://" not in js_resp.text
+
+    def test_every_js_endpoint_exists_in_api(self, synthetic_api_db):
+        """Every API URL called by src/unpicked_intent/web/app.js must exist as an API route."""
+        js_path = api_mod.WEB_DIR / "app.js"
+        assert js_path.is_file()
+        js_text = js_path.read_text(encoding="utf-8")
+
+        # Extract literal/template URLs passed to fetchJson(...) or fetch(...)
+        raw_urls = re.findall(r"""(?:fetchJson|fetch)\(\s*["'`]([^"'`]+)["'`]""", js_text)
+        assert len(raw_urls) >= 3, f"Expected at least 3 API calls in app.js, found {raw_urls}"
+
+        # Normalize JS template expressions like ${encodeURIComponent(tid)} -> 47351
+        concrete_paths = sorted(
+            {re.sub(r"\$\{[^}]+\}", "47351", url) for url in raw_urls}
+        )
+        assert "/teams" in concrete_paths
+        assert "/self-scout" in concrete_paths
+        assert "/silence/47351" in concrete_paths
+
+        # Every extracted path must match a registered FastAPI APIRoute (not StaticFiles)
+        api_routes = [r for r in api_mod.app.routes if isinstance(r, APIRoute)]
+        for path in concrete_paths:
+            matched = any(
+                route.matches({"type": "http", "path": path, "method": "GET"})[0].name == "FULL"
+                for route in api_routes
+            )
+            assert matched, f"JS calls '{path}', which does not match any FastAPI APIRoute"
+
+        # And every endpoint responds 200 against the synthetic DuckDB
+        client = TestClient(api_mod.app)
+        for path in concrete_paths:
+            resp = client.get(path)
+            assert resp.status_code == 200, f"JS endpoint '{path}' returned {resp.status_code}"
