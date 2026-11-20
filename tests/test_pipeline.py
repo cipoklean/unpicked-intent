@@ -937,18 +937,14 @@ class TestInferPlayers:
         result = infer(history, priors)
         assert result["P1"]["role"] == "top"
 
-        # Create a temporary overrides file
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False, newline="", encoding="utf-8") as f:
-            f.write("player_id,role\n")
-            f.write("P1,mid\n")
-            tmp_path = Path(f.name)
+        # Create a temporary overrides file inside an auto-cleaned temp directory
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_overrides = Path(tmpdir) / "overrides.csv"
+            tmp_overrides.write_text("player_id,role\nP1,mid\n", encoding="utf-8")
 
-        try:
-            result = apply_overrides(result, overrides_path=tmp_path)
+            result = apply_overrides(result, overrides_path=tmp_overrides)
             assert result["P1"]["role"] == "mid"
             assert result["P1"]["flex"] is False
-        finally:
-            tmp_path.unlink()
 
     def test_apply_overrides_no_file(self):
         """apply_overrides() is a no-op when the overrides file doesn't exist."""
@@ -1056,7 +1052,7 @@ class TestBuildPipeline:
         """run_pipeline processes synthetic fixtures and writes DuckDB."""
         import tempfile
         import shutil
-        from unpicked_intent.pipeline.build import run_pipeline, DERIVED, DB_PATH
+        from unpicked_intent.pipeline.build import run_pipeline
 
         # Create a synthetic GRID repo structure
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1075,15 +1071,17 @@ class TestBuildPipeline:
             import unpicked_intent.pipeline.build as build_mod
             orig_derived = build_mod.DERIVED
             orig_db = build_mod.DB_PATH
+            tmp_derived = Path(tmpdir) / "derived"
+            tmp_db = tmp_derived / "unpicked.duckdb"
             try:
-                build_mod.DERIVED = Path(tmpdir) / "derived"
-                build_mod.DB_PATH = build_mod.DERIVED / "unpicked.duckdb"
+                build_mod.DERIVED = tmp_derived
+                build_mod.DB_PATH = tmp_db
                 run_pipeline(str(grid))
 
-                assert build_mod.DB_PATH.exists()
+                assert tmp_db.exists()
 
                 import duckdb
-                con = duckdb.connect(str(build_mod.DB_PATH))
+                con = duckdb.connect(str(tmp_db))
 
                 # Check draft_events
                 de_count = con.execute("SELECT COUNT(*) FROM draft_events").fetchone()[0]
@@ -1106,9 +1104,48 @@ class TestBuildPipeline:
             finally:
                 build_mod.DERIVED = orig_derived
                 build_mod.DB_PATH = orig_db
-                # Clean up any DB created
-                if build_mod.DB_PATH.exists():
-                    build_mod.DB_PATH.unlink()
+
+    def test_pipeline_test_does_not_touch_real_db(self):
+        """Guard: running test_run_pipeline_on_synthetic_fixtures leaves real derived/unpicked.duckdb untouched."""
+        import unpicked_intent.pipeline.build as build_mod
+
+        real_db = build_mod.DB_PATH
+        assert real_db.parent.name == "derived"
+        assert (real_db.parent.parent / "pyproject.toml").is_file()
+
+        created_sentinel = False
+        sentinel_bytes = b"sentinel-real-db-do-not-delete"
+
+        if real_db.exists():
+            stat = real_db.stat()
+            orig_mtime_ns = stat.st_mtime_ns
+            orig_size = stat.st_size
+        else:
+            real_db.parent.mkdir(parents=True, exist_ok=True)
+            real_db.write_bytes(sentinel_bytes)
+            created_sentinel = True
+            stat = real_db.stat()
+            orig_mtime_ns = stat.st_mtime_ns
+            orig_size = stat.st_size
+
+        try:
+            self.test_run_pipeline_on_synthetic_fixtures()
+
+            assert real_db.exists(), (
+                f"Real database at {real_db} was deleted by test_run_pipeline_on_synthetic_fixtures!"
+            )
+            after_stat = real_db.stat()
+            assert after_stat.st_mtime_ns == orig_mtime_ns, (
+                f"Real database at {real_db} was modified (mtime changed)!"
+            )
+            assert after_stat.st_size == orig_size, (
+                f"Real database at {real_db} was modified (size changed)!"
+            )
+            if created_sentinel:
+                assert real_db.read_bytes() == sentinel_bytes
+        finally:
+            if created_sentinel and real_db.exists():
+                real_db.unlink()
 
 
 class TestBaseline:
@@ -1399,10 +1436,10 @@ class TestBaseline:
             orig_baseline_derived = baseline_mod.DERIVED
             orig_baseline_db = baseline_mod.DB_PATH
 
-            try:
-                shared_derived = Path(tmpdir) / "derived"
-                shared_db = shared_derived / "unpicked.duckdb"
+            shared_derived = Path(tmpdir) / "derived"
+            shared_db = shared_derived / "unpicked.duckdb"
 
+            try:
                 build_mod.DERIVED = shared_derived
                 build_mod.DB_PATH = shared_db
                 baseline_mod.DERIVED = shared_derived
@@ -1428,8 +1465,6 @@ class TestBaseline:
                 build_mod.DB_PATH = orig_build_db
                 baseline_mod.DERIVED = orig_baseline_derived
                 baseline_mod.DB_PATH = orig_baseline_db
-                if shared_db.exists():
-                    shared_db.unlink()
 
 
 class TestSignals:
@@ -2034,10 +2069,10 @@ class TestSignals:
             orig_signals_derived = signals_mod.DERIVED
             orig_signals_db = signals_mod.DB_PATH
 
-            try:
-                shared_derived = Path(tmpdir) / "derived"
-                shared_db = shared_derived / "unpicked.duckdb"
+            shared_derived = Path(tmpdir) / "derived"
+            shared_db = shared_derived / "unpicked.duckdb"
 
+            try:
                 build_mod.DERIVED = shared_derived
                 build_mod.DB_PATH = shared_db
                 baseline_mod.DERIVED = shared_derived
@@ -2142,8 +2177,6 @@ class TestSignals:
                 baseline_mod.DB_PATH = orig_baseline_db
                 signals_mod.DERIVED = orig_signals_derived
                 signals_mod.DB_PATH = orig_signals_db
-                if shared_db.exists():
-                    shared_db.unlink()
 
     def test_signals_idempotent(self):
         """Running signals twice should not double the row counts.
@@ -2173,10 +2206,10 @@ class TestSignals:
             orig_signals_derived = signals_mod.DERIVED
             orig_signals_db = signals_mod.DB_PATH
 
-            try:
-                shared_derived = Path(tmpdir) / "derived"
-                shared_db = shared_derived / "unpicked.duckdb"
+            shared_derived = Path(tmpdir) / "derived"
+            shared_db = shared_derived / "unpicked.duckdb"
 
+            try:
                 build_mod.DERIVED = shared_derived
                 build_mod.DB_PATH = shared_db
                 baseline_mod.DERIVED = shared_derived
@@ -2248,8 +2281,6 @@ class TestSignals:
                 baseline_mod.DB_PATH = orig_baseline_db
                 signals_mod.DERIVED = orig_signals_derived
                 signals_mod.DB_PATH = orig_signals_db
-                if shared_db.exists():
-                    shared_db.unlink()
 
     def test_load_names_filters_lol_only(self):
         """load_names reads tests/fixtures/meta/teams.csv and players.csv, LoL only."""
