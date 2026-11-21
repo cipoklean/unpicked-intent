@@ -120,6 +120,38 @@ def test_export_writes_exact_api_responses(synthetic_export_db, tmp_path):
     exported_self_scout = json.loads(self_scout_file.read_text(encoding="utf-8"))
     assert exported_self_scout == client.get("/self-scout").json()
 
+    # Draft Replay files: one games.json per TARGET_TEAM and one {game_id}.json per recent game
+    replay_dir = out_dir / "data" / "replay"
+    assert replay_dir.is_dir()
+    exported_replay_teams = sorted(p.name for p in replay_dir.iterdir() if p.is_dir())
+    expected_replay_teams = sorted(str(tid) for tid in api_mod.TARGET_TEAMS)
+    assert exported_replay_teams == expected_replay_teams
+    assert summary["replay_teams"] == len(api_mod.TARGET_TEAMS)
+
+    total_replay_games = 0
+    for target_id in api_mod.TARGET_TEAMS:
+        tid = str(target_id)
+        games_file = replay_dir / tid / "games.json"
+        assert games_file.is_file()
+        exported_games = json.loads(games_file.read_text(encoding="utf-8"))
+        api_games = client.get(f"/replay/{tid}/games").json()
+        assert exported_games == api_games
+
+        for game in exported_games["games"]:
+            gid = str(game["game_id"])
+            detail_file = replay_dir / tid / f"{gid}.json"
+            assert detail_file.is_file()
+            exported_detail = json.loads(detail_file.read_text(encoding="utf-8"))
+            api_detail = client.get(f"/replay/{tid}/{gid}").json()
+            assert exported_detail == api_detail
+            total_replay_games += 1
+
+    # Synthetic fixture populates 5 recent games each for 47351 and 340 -> 10 replay game files
+    assert total_replay_games == 10
+    assert summary["replay_games"] == total_replay_games
+    # Non-target teams must never be exported under data/replay/
+    assert not (replay_dir / "T1").exists()
+
 
 def test_export_web_assets_static_flag_and_offline(synthetic_export_db, tmp_path):
     """dist/index.html has data-static="1" (source does not) and no http(s) URLs exist in dist."""
@@ -147,6 +179,7 @@ def test_export_web_assets_static_flag_and_offline(synthetic_export_db, tmp_path
     assert "data/teams.json" in js_text
     assert "data/self-scout.json" in js_text
     assert "data/silence/${teamId}.json" in js_text
+    assert "data/replay/${rest}.json" in js_text
 
     # No external http(s) URLs in any exported HTML/JS/CSS
     for asset in out_dir.rglob("*"):

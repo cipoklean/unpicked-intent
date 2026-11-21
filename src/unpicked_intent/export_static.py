@@ -84,19 +84,53 @@ def export_static(out_dir: str | Path) -> dict[str, int | str]:
 
     self_scout_bytes = _get_200_json_bytes(client, "/self-scout")
 
+    # Fetch Draft Replay payloads for every target team (5 most recent complete games each).
+    replay_games_payloads: list[tuple[str, bytes]] = []
+    replay_detail_payloads: list[tuple[str, str, bytes]] = []
+    for target_id in api_main.TARGET_TEAMS:
+        tid = str(target_id)
+        encoded_tid = quote(tid, safe="")
+        games_resp = client.get(f"/replay/{encoded_tid}/games")
+        if games_resp.status_code != 200:
+            raise RuntimeError(
+                f"Export request GET /replay/{encoded_tid}/games failed with HTTP "
+                f"{games_resp.status_code}: {games_resp.text}"
+            )
+        games_data = games_resp.json()
+        replay_games_payloads.append((tid, games_resp.content))
+
+        for game in games_data.get("games", []):
+            gid = str(game["game_id"])
+            encoded_gid = quote(gid, safe="")
+            detail_bytes = _get_200_json_bytes(
+                client, f"/replay/{encoded_tid}/{encoded_gid}"
+            )
+            replay_detail_payloads.append((tid, gid, detail_bytes))
+
     out_path = Path(out_dir)
     data_dir = out_path / "data"
     silence_dir = data_dir / "silence"
+    replay_dir = data_dir / "replay"
 
     out_path.mkdir(parents=True, exist_ok=True)
     if data_dir.exists():
         shutil.rmtree(data_dir)
     silence_dir.mkdir(parents=True, exist_ok=True)
+    replay_dir.mkdir(parents=True, exist_ok=True)
 
     (data_dir / "teams.json").write_bytes(teams_bytes)
     for team_id, payload in silence_payloads:
         (silence_dir / f"{team_id}.json").write_bytes(payload)
     (data_dir / "self-scout.json").write_bytes(self_scout_bytes)
+
+    for tid, games_bytes in replay_games_payloads:
+        team_replay_dir = replay_dir / tid
+        team_replay_dir.mkdir(parents=True, exist_ok=True)
+        (team_replay_dir / "games.json").write_bytes(games_bytes)
+    for tid, gid, detail_bytes in replay_detail_payloads:
+        team_replay_dir = replay_dir / tid
+        team_replay_dir.mkdir(parents=True, exist_ok=True)
+        (team_replay_dir / f"{gid}.json").write_bytes(detail_bytes)
 
     # Copy web assets into out_path, setting data-static="1" only on dist/index.html.
     for src_item in sorted(web_dir.iterdir()):
@@ -116,6 +150,8 @@ def export_static(out_dir: str | Path) -> dict[str, int | str]:
         "out_dir": str(out_path),
         "teams": len(silence_payloads),
         "silence_files": len(silence_payloads),
+        "replay_teams": len(replay_games_payloads),
+        "replay_games": len(replay_detail_payloads),
     }
 
 
@@ -139,6 +175,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"Exported static site to {summary['out_dir']}: "
         f"{summary['teams']} teams, {summary['silence_files']} silence files, "
+        f"{summary['replay_teams']} replay teams ({summary['replay_games']} games), "
         "self-scout.json, and web assets."
     )
     return 0

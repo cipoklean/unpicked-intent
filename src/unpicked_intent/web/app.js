@@ -1,10 +1,12 @@
 "use strict";
 
-/* Unpicked Intent — Silence Report Frontend
+/* Unpicked Intent — Silence Report & Draft Replay Frontend
  * Plain offline JS talking strictly to FastAPI endpoints:
  *   GET /teams
  *   GET /silence/{team_id}
  *   GET /self-scout
+ *   GET /replay/{team_id}/games
+ *   GET /replay/{team_id}/{game_id}
  */
 
 const TARGET_TEAM_IDS = new Set([
@@ -35,12 +37,27 @@ const ROLE_SHORT = {
   support: "SUP",
 };
 
+const PHASE_ORDER = ["ban1", "pick1", "ban2", "pick2"];
+const PHASE_LABELS = {
+  ban1: "Ban Phase 1 · Slots 1–6",
+  pick1: "Pick Phase 1 · Slots 7–12",
+  ban2: "Ban Phase 2 · Slots 13–16",
+  pick2: "Pick Phase 2 · Slots 17–20",
+};
+const PHASE_SHORT = {
+  ban1: "BAN 1",
+  pick1: "PICK 1",
+  ban2: "BAN 2",
+  pick2: "PICK 2",
+};
+
 const state = {
   teams: [],
   teamQuery: "",
   activeTeamId: null,
   lastOpponentTeamId: null,
   selfScoutMode: false,
+  activeView: "silence", // 'silence' | 'replay'
   report: null,
   requestSeq: 0,
   // Left-open filters
@@ -51,6 +68,14 @@ const state = {
   // Early-ban filters
   earlyOnly: false,
   banQuery: "",
+  // Draft Replay state
+  replayTeamId: null,
+  replayGames: [],
+  replayGameId: null,
+  replayDetail: null,
+  replaySlotIdx: 0,
+  replayFilter: "all", // 'all' | 'open' | 'resolved'
+  replayReqSeq: 0,
 };
 
 const els = {
@@ -67,6 +92,11 @@ const els = {
   kpiStrongCount: document.getElementById("kpi-strong-count"),
   kpiLeadCount: document.getElementById("kpi-lead-count"),
   kpiEarlyBanCount: document.getElementById("kpi-early-ban-count"),
+  viewTabs: document.getElementById("view-tabs"),
+  tabSilence: document.getElementById("tab-silence"),
+  tabReplay: document.getElementById("tab-replay"),
+  silenceView: document.getElementById("silence-view"),
+  replayView: document.getElementById("replay-view"),
   reportMinNNote: document.getElementById("report-min-n-note"),
   actionsHeading: document.getElementById("actions-heading"),
   actionsSubtitle: document.getElementById("actions-subtitle"),
@@ -80,6 +110,23 @@ const els = {
   earlyOnlyToggle: document.getElementById("early-only-toggle"),
   banSearch: document.getElementById("ban-search"),
   earlyBanContainer: document.getElementById("early-ban-container"),
+  // Draft Replay elements
+  replayMinNNote: document.getElementById("replay-min-n-note"),
+  replayGamesCount: document.getElementById("replay-games-count"),
+  replayGamePicker: document.getElementById("replay-game-picker"),
+  replayStatus: document.getElementById("replay-status"),
+  replayBody: document.getElementById("replay-body"),
+  replayGameMeta: document.getElementById("replay-game-meta"),
+  replayPrevBtn: document.getElementById("replay-prev-btn"),
+  replayNextBtn: document.getElementById("replay-next-btn"),
+  replaySlotCounter: document.getElementById("replay-slot-counter"),
+  replaySlotBanner: document.getElementById("replay-slot-banner"),
+  replayBurnedBar: document.getElementById("replay-burned-bar"),
+  replayDraftStrip: document.getElementById("replay-draft-strip"),
+  replayTellsSub: document.getElementById("replay-tells-sub"),
+  replayStateSummary: document.getElementById("replay-state-summary"),
+  replayStatePills: document.getElementById("replay-state-pills"),
+  replayTellsContainer: document.getElementById("replay-tells-container"),
 };
 
 /* ---------- Formatting & Escaping ---------- */
@@ -140,6 +187,10 @@ function resolveDataUrl(endpoint) {
     const teamId = endpoint.slice("/silence/".length);
     return `data/silence/${teamId}.json`;
   }
+  if (endpoint.startsWith("/replay/")) {
+    const rest = endpoint.slice("/replay/".length);
+    return `data/replay/${rest}.json`;
+  }
   return endpoint;
 }
 
@@ -168,7 +219,10 @@ async function fetchJson(endpoint) {
   }
   if (parseError) {
     const err = new Error("Expected JSON response.");
-    err.status = IS_STATIC && endpoint.startsWith("/silence/") ? 404 : 500;
+    err.status =
+      IS_STATIC && (endpoint.startsWith("/silence/") || endpoint.startsWith("/replay/"))
+        ? 404
+        : 500;
     err.detail =
       err.status === 404
         ? "No exported report found for this team."
@@ -685,9 +739,516 @@ function renderEarlyBanTable(report) {
   </table>`;
 }
 
+/* ---------- Draft Replay View ---------- */
+
+function isTargetTeam(teamId) {
+  return TARGET_TEAM_IDS.has(String(teamId));
+}
+
+function updateUrlHash() {
+  let targetHash;
+  if (state.selfScoutMode) {
+    if (state.activeView === "replay") {
+      targetHash = state.replayGameId
+        ? `#/self-scout/replay/${encodeURIComponent(state.replayGameId)}`
+        : "#/self-scout/replay";
+    } else {
+      targetHash = "#/self-scout";
+    }
+  } else if (state.activeTeamId) {
+    const tid = encodeURIComponent(state.activeTeamId);
+    if (state.activeView === "replay" && isTargetTeam(state.activeTeamId)) {
+      targetHash = state.replayGameId
+        ? `#/team/${tid}/replay/${encodeURIComponent(state.replayGameId)}`
+        : `#/team/${tid}/replay`;
+    } else {
+      targetHash = `#/team/${tid}`;
+    }
+  } else {
+    return;
+  }
+  if (window.location.hash !== targetHash) {
+    window.history.replaceState(null, "", targetHash);
+  }
+}
+
+function syncActiveViewTabs() {
+  const canReplay = isTargetTeam(state.activeTeamId);
+  els.tabReplay.classList.toggle("hidden", !canReplay);
+
+  if (!canReplay && state.activeView === "replay") {
+    state.activeView = "silence";
+  }
+
+  const isReplay = state.activeView === "replay" && canReplay;
+  els.tabSilence.classList.toggle("active", !isReplay);
+  els.tabSilence.setAttribute("aria-selected", isReplay ? "false" : "true");
+  els.tabReplay.classList.toggle("active", isReplay);
+  els.tabReplay.setAttribute("aria-selected", isReplay ? "true" : "false");
+
+  els.silenceView.classList.toggle("hidden", isReplay);
+  els.replayView.classList.toggle("hidden", !isReplay);
+}
+
+function showReplayStatus(html) {
+  els.replayBody.classList.add("hidden");
+  els.replayStatus.innerHTML = html;
+  els.replayStatus.classList.remove("hidden");
+}
+
+function showReplayBody() {
+  els.replayStatus.classList.add("hidden");
+  els.replayBody.classList.remove("hidden");
+}
+
+function renderReplayGamePicker() {
+  const games = state.replayGames;
+  els.replayGamesCount.textContent =
+    games.length === 1 ? "1 game" : `${games.length} games`;
+
+  if (games.length === 0) {
+    els.replayGamePicker.innerHTML = `<div class="empty-table-msg">No complete games found for this team.</div>`;
+    return;
+  }
+
+  els.replayGamePicker.innerHTML = games
+    .map((g) => {
+      const isActive = g.game_id === state.replayGameId;
+      const sideKey = String(g.side || "").toLowerCase();
+      const sideCls = sideKey === "blue" ? "side-blue" : "side-red";
+      const sideLabel = sideKey === "blue" ? "BLUE" : "RED";
+      const fearlessCls = Number(g.game_num) >= 2 ? "is-fearless" : "";
+
+      return `<button
+        type="button"
+        class="game-card ${sideCls} ${isActive ? "active" : ""}"
+        data-game-id="${escapeHtml(g.game_id)}"
+        role="option"
+        aria-selected="${isActive ? "true" : "false"}"
+      >
+        <div class="game-card-top">
+          <span class="game-card-opp">vs ${escapeHtml(g.opponent_name || g.opponent_id)}</span>
+          <span class="game-num-tag ${fearlessCls}">G${Number(g.game_num)}</span>
+        </div>
+        <div class="game-card-meta">
+          <span class="side-pill ${sideCls}">${sideLabel}</span>
+          <span>${escapeHtml(g.played_at || "—")}</span>
+          <span>Patch ${escapeHtml(g.patch || "—")}</span>
+        </div>
+      </button>`;
+    })
+    .join("");
+}
+
+function renderReplayDraftStrip(detail) {
+  const slots = Array.isArray(detail.slots) ? detail.slots : [];
+  const currentIdx = Math.min(Math.max(0, state.replaySlotIdx), Math.max(0, slots.length - 1));
+  const currentSlot = slots[currentIdx];
+
+  // Determine Blue and Red team labels from slots
+  const blueSlot = slots.find((s) => s.side === "blue");
+  const redSlot = slots.find((s) => s.side === "red");
+  const blueTeamName = blueSlot ? blueSlot.team_name : "Blue Side";
+  const redTeamName = redSlot ? redSlot.team_name : "Red Side";
+  const blueIsScouted = blueSlot && String(blueSlot.team_id) === String(detail.team_id);
+  const redIsScouted = redSlot && String(redSlot.team_id) === String(detail.team_id);
+
+  const headerHtml = `<div class="draft-sides-header">
+    <div class="draft-side-title side-blue">
+      <span>BLUE · ${escapeHtml(blueTeamName)}</span>
+      ${blueIsScouted ? `<span class="scouted-tag">SCOUTED</span>` : ""}
+    </div>
+    <div class="draft-side-title side-red">
+      <span>RED · ${escapeHtml(redTeamName)}</span>
+      ${redIsScouted ? `<span class="scouted-tag">SCOUTED</span>` : ""}
+    </div>
+  </div>`;
+
+  const phasesHtml = PHASE_ORDER.map((phase) => {
+    const phaseSlots = slots
+      .map((s, idx) => ({ slotObj: s, idx }))
+      .filter(({ slotObj }) => slotObj.phase === phase);
+
+    const blueCells = phaseSlots.filter(({ slotObj }) => slotObj.side === "blue");
+    const redCells = phaseSlots.filter(({ slotObj }) => slotObj.side === "red");
+
+    const renderCell = ({ slotObj, idx }) => {
+      const isCurrent = idx === currentIdx;
+      const isFuture = idx > currentIdx;
+      const isBan = slotObj.action === "ban";
+      const sideCls = slotObj.side === "blue" ? "side-blue" : "side-red";
+      const actionCls = isBan ? "action-ban" : "action-pick";
+      const stateCls = isCurrent ? "is-current" : isFuture ? "is-future" : "is-past";
+      const actionTag = isBan
+        ? `<span class="draft-action-tag tag-ban">BAN</span>`
+        : `<span class="draft-action-tag tag-pick">PICK</span>`;
+
+      return `<button
+        type="button"
+        class="draft-cell ${sideCls} ${actionCls} ${stateCls}"
+        data-slot-idx="${idx}"
+        aria-current="${isCurrent ? "step" : "false"}"
+        title="Slot ${slotObj.slot}: ${escapeHtml(slotObj.team_name)} ${isBan ? "banned" : "picked"} ${escapeHtml(slotObj.champion)}"
+      >
+        <span class="draft-cell-head">
+          <span class="draft-slot-num">#${Number(slotObj.slot)}</span>
+          ${actionTag}
+        </span>
+        <span class="champ-chip">${escapeHtml(slotObj.champion)}</span>
+      </button>`;
+    };
+
+    return `<div class="draft-phase-block">
+      <div class="draft-phase-label">${PHASE_LABELS[phase]}</div>
+      <div class="draft-phase-columns">
+        <div class="draft-side-row">${blueCells.map(renderCell).join("")}</div>
+        <div class="draft-side-row">${redCells.map(renderCell).join("")}</div>
+      </div>
+    </div>`;
+  }).join("");
+
+  els.replayDraftStrip.innerHTML = headerHtml + phasesHtml;
+
+  // Update stepper controls & current slot banner
+  els.replayPrevBtn.disabled = currentIdx <= 0;
+  els.replayNextBtn.disabled = currentIdx >= slots.length - 1;
+  els.replaySlotCounter.textContent =
+    slots.length > 0 ? `Slot ${currentSlot.slot} / ${slots.length}` : "No slots";
+
+  if (currentSlot) {
+    const isTargetActing = String(currentSlot.team_id) === String(detail.team_id);
+    const sideCls = currentSlot.side === "blue" ? "side-blue" : "side-red";
+    const sideLabel = currentSlot.side === "blue" ? "BLUE" : "RED";
+    const phaseLabel = PHASE_SHORT[currentSlot.phase] || currentSlot.phase;
+    const verb = currentSlot.action === "ban" ? "banned" : "picked";
+    const actingPill = isTargetActing
+      ? `<span class="acting-pill">${escapeHtml(detail.team_name)} ACTING</span>`
+      : "";
+
+    els.replaySlotBanner.className = `replay-slot-banner ${isTargetActing ? "is-target-acting" : ""}`.trim();
+    els.replaySlotBanner.innerHTML = `
+      <div class="slot-banner-main">
+        <span class="side-pill ${sideCls}">${sideLabel}</span>
+        <span class="game-num-tag">${escapeHtml(phaseLabel)}</span>
+        <span class="slot-banner-text">
+          <strong>${escapeHtml(currentSlot.team_name)}</strong> ${verb}
+          <strong>${escapeHtml(currentSlot.champion)}</strong>
+        </span>
+        ${actingPill}
+      </div>
+      <span class="slot-kbd-hint">&larr; / &rarr; keys step</span>
+    `;
+  } else {
+    els.replaySlotBanner.className = "replay-slot-banner";
+    els.replaySlotBanner.innerHTML = "";
+  }
+}
+
+function renderReplayBurnedBar(detail) {
+  const burned = Array.isArray(detail.burned) ? detail.burned : [];
+  if (burned.length === 0) {
+    els.replayBurnedBar.classList.add("hidden");
+    els.replayBurnedBar.innerHTML = "";
+    return;
+  }
+
+  const tellChamps = new Set((detail.tells || []).map((t) => t.champion));
+  const chips = burned
+    .map((champ) => {
+      const cls = tellChamps.has(champ) ? "burned-chip is-tell-champ" : "burned-chip";
+      return `<span class="${cls}">${escapeHtml(champ)}</span>`;
+    })
+    .join("");
+
+  els.replayBurnedBar.innerHTML = `
+    <span class="burned-bar-label">Fearless Burned (${burned.length} from earlier games):</span>
+    ${chips}
+  `;
+  els.replayBurnedBar.classList.remove("hidden");
+}
+
+function renderReplayTellsPanel(detail) {
+  const slots = Array.isArray(detail.slots) ? detail.slots : [];
+  const tells = Array.isArray(detail.tells) ? detail.tells : [];
+  const currentIdx = Math.min(Math.max(0, state.replaySlotIdx), Math.max(0, slots.length - 1));
+  const currentSlot = slots[currentIdx];
+  const isTargetActing = Boolean(
+    currentSlot && String(currentSlot.team_id) === String(detail.team_id)
+  );
+  const opponentName = (detail.game && detail.game.opponent_name) || "opponent";
+
+  els.replayTellsSub.textContent = currentSlot
+    ? isTargetActing
+      ? `Slot ${currentSlot.slot} (${detail.team_name} acting): open tells are highlighted below as skipped opportunities.`
+      : `Slot ${currentSlot.slot} (${currentSlot.team_name} acting): live availability of ${detail.team_name}'s surfaced tells (n ≥ ${Number(detail.min_n || 4)}).`
+    : "Shows whether each surfaced tell is open, taken, denied, banned, or burned at this draft slot.";
+
+  // Update state filter pills active state
+  els.replayStatePills.querySelectorAll(".pill").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.replayFilter === state.replayFilter);
+  });
+
+  if (tells.length === 0) {
+    els.replayStateSummary.textContent = "0 tells";
+    els.replayTellsContainer.innerHTML = `<div class="empty-table-msg">No surfaced tells with at least ${Number(detail.min_n || 4)} qualifying games for this team.</div>`;
+    return;
+  }
+
+  const counts = {
+    open: 0,
+    picked_by_team: 0,
+    picked_by_opponent: 0,
+    banned: 0,
+    burned: 0,
+  };
+
+  const enriched = tells.map((tell, origIdx) => {
+    const states = Array.isArray(tell.slot_states) ? tell.slot_states : [];
+    const curState = states[currentIdx] || "open";
+    const prevState = currentIdx > 0 ? states[currentIdx - 1] || "open" : "open";
+    const changedHere = curState !== "burned" && curState !== "open" && curState !== prevState;
+    if (Object.prototype.hasOwnProperty.call(counts, curState)) {
+      counts[curState] += 1;
+    }
+    return { tell, curState, changedHere, origIdx };
+  });
+
+  const summaryParts = [`${counts.open} open`];
+  if (counts.picked_by_team > 0) summaryParts.push(`${counts.picked_by_team} taken`);
+  if (counts.picked_by_opponent > 0) summaryParts.push(`${counts.picked_by_opponent} denied`);
+  if (counts.banned > 0) summaryParts.push(`${counts.banned} banned`);
+  if (counts.burned > 0) summaryParts.push(`${counts.burned} burned`);
+  els.replayStateSummary.textContent = summaryParts.join(" · ");
+
+  const filtered = enriched.filter(({ curState }) => {
+    if (state.replayFilter === "open") return curState === "open";
+    if (state.replayFilter === "resolved") return curState !== "open";
+    return true;
+  });
+
+  if (filtered.length === 0) {
+    els.replayTellsContainer.innerHTML = `<div class="empty-table-msg">No tells match this state filter at slot ${currentSlot ? currentSlot.slot : 1}.</div>`;
+    return;
+  }
+
+  // Surface newly-resolved tells on this slot first, then open tells, then unavailable tells,
+  // preserving p_value rank (origIdx) within each group.
+  const bucketOf = (item) => {
+    if (item.changedHere) return 0;
+    if (item.curState === "open") return 1;
+    return 2;
+  };
+  filtered.sort((a, b) => bucketOf(a) - bucketOf(b) || a.origIdx - b.origIdx);
+
+  const rowsHtml = filtered
+    .map(({ tell, curState, changedHere }) => {
+      const isStrong = tell.label === "strong";
+      const k = Number(tell.k);
+      const taken = Number(tell.taken);
+      const expected = Number(tell.expected);
+      const obsPct = k > 0 ? Math.min(100, Math.max(0, (taken / k) * 100)) : 0;
+      const expPct = k > 0 ? Math.min(100, Math.max(0, (expected / k) * 100)) : 0;
+      const isOpenActing = curState === "open" && isTargetActing;
+
+      let stateHtml;
+      if (isOpenActing) {
+        stateHtml = `<span class="state-badge state-open-acting">Open now, history says they skip it</span>`;
+      } else if (curState === "open") {
+        stateHtml = `<span class="state-badge state-open">Open</span>`;
+      } else if (curState === "picked_by_team") {
+        stateHtml = `<span class="state-badge state-taken">Picked by ${escapeHtml(detail.team_name)}</span>`;
+      } else if (curState === "picked_by_opponent") {
+        stateHtml = `<span class="state-badge state-denied">Denied by ${escapeHtml(opponentName)}</span>`;
+      } else if (curState === "banned") {
+        stateHtml = `<span class="state-badge state-banned">Banned</span>`;
+      } else {
+        stateHtml = `<span class="state-badge state-burned">Burned (Fearless)</span>`;
+      }
+      if (changedHere) {
+        stateHtml += `<span class="this-slot-tag">this slot</span>`;
+      }
+
+      const rowClasses = [
+        "tell-row",
+        "replay-tell-row",
+        isStrong ? "row-strong" : "row-lead",
+        isOpenActing ? "is-open-acting" : "",
+        changedHere ? "is-this-slot" : "",
+        curState !== "open" && !changedHere ? "is-unavailable" : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+
+      return `<tr class="${rowClasses}">
+        <td>${signalBadgeHtml(tell.label)}</td>
+        <td>
+          <div class="champ-cell">
+            ${roleBadgeHtml(tell.role)}
+            <span class="champ-name">${escapeHtml(tell.champion)}</span>
+          </div>
+        </td>
+        <td class="player-name">${escapeHtml(tell.player_name)}</td>
+        <td>${stateHtml}</td>
+        <td class="evidence-cell">
+          <div class="evidence-words">
+            Taken in <strong>${taken}</strong> of <strong>${k}</strong> open games
+            <span class="exp-muted">&middot; expected <strong>${formatExpected(expected)}</strong></span>
+          </div>
+          <div class="rate-bar-wrap" title="Observed ${taken}/${k} vs expected ${formatExpected(expected)}/${k}">
+            <div class="rate-bar-obs" style="width: ${obsPct.toFixed(1)}%"></div>
+            <div class="rate-bar-exp" style="left: ${expPct.toFixed(1)}%"></div>
+          </div>
+        </td>
+        <td class="num">${k}</td>
+        <td class="num">${taken}</td>
+        <td class="num">${formatExpected(expected)}</td>
+        <td class="num p-val">${formatProb(tell.p_value)}</td>
+        <td class="num ${isStrong ? "q-strong" : "q-lead"}">${formatProb(tell.q_value)}</td>
+      </tr>`;
+    })
+    .join("");
+
+  els.replayTellsContainer.innerHTML = `<div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Tier</th>
+          <th>Champion</th>
+          <th>Player</th>
+          <th>State at Slot ${currentSlot ? Number(currentSlot.slot) : 1}</th>
+          <th>Observed vs. Expected (n open games)</th>
+          <th class="num">n</th>
+          <th class="num">Obs</th>
+          <th class="num">Exp</th>
+          <th class="num">p</th>
+          <th class="num">q</th>
+        </tr>
+      </thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>
+  </div>`;
+}
+
+function renderReplaySlotView() {
+  if (!state.replayDetail) return;
+  const detail = state.replayDetail;
+  const g = detail.game || {};
+  const sideLabel = String(g.side || "").toUpperCase();
+  els.replayGameMeta.textContent =
+    `${detail.team_name} (${sideLabel}) vs ${g.opponent_name || g.opponent_id} · Game ${g.game_num} · ${g.played_at || "—"} · Patch ${g.patch || "—"}`;
+  els.replayMinNNote.textContent =
+    detail.note || "We only show tells with at least 4 qualifying games.";
+
+  renderReplayBurnedBar(detail);
+  renderReplayDraftStrip(detail);
+  renderReplayTellsPanel(detail);
+  showReplayBody();
+}
+
+async function loadReplayGame(teamId, gameId, updateHash = true) {
+  const tid = String(teamId);
+  const gid = String(gameId);
+  const reqId = ++state.replayReqSeq;
+
+  state.replayGameId = gid;
+  state.replayDetail = null;
+  state.replaySlotIdx = 0;
+  renderReplayGamePicker();
+  if (updateHash) updateUrlHash();
+  showReplayStatus(`Loading 20-slot draft replay…`);
+
+  try {
+    const detail = await fetchJson(
+      `/replay/${encodeURIComponent(tid)}/${encodeURIComponent(gid)}`
+    );
+    if (reqId !== state.replayReqSeq || state.activeTeamId !== tid) return;
+    state.replayDetail = detail;
+    state.replaySlotIdx = 0;
+    renderReplaySlotView();
+  } catch (err) {
+    if (reqId !== state.replayReqSeq) return;
+    if (err.status === 503) {
+      render503State(err.detail);
+    } else if (err.status === 404) {
+      showReplayStatus(
+        `<strong>Game not available for Draft Replay (404).</strong> ${escapeHtml(err.detail || err.message)}`
+      );
+    } else {
+      showReplayStatus(
+        `<strong>Could not load Draft Replay.</strong> ${escapeHtml(err.detail || err.message)}`
+      );
+    }
+  }
+}
+
+async function loadReplayForTeam(teamId, preferredGameId = null, updateHash = true) {
+  const tid = String(teamId);
+  if (!isTargetTeam(tid)) return;
+
+  // Reuse already-loaded games list for this team if we already have it
+  if (state.replayTeamId === tid && state.replayGames.length > 0 && !preferredGameId && state.replayDetail) {
+    renderReplayGamePicker();
+    renderReplaySlotView();
+    if (updateHash) updateUrlHash();
+    return;
+  }
+
+  const reqId = ++state.replayReqSeq;
+  state.replayTeamId = tid;
+  state.replayGames = [];
+  state.replayGameId = null;
+  state.replayDetail = null;
+  state.replaySlotIdx = 0;
+  els.replayGamePicker.innerHTML = `<div class="empty-table-msg">Loading recent games…</div>`;
+  els.replayGamesCount.textContent = "…";
+  showReplayStatus("Loading recent complete games…");
+
+  try {
+    const data = await fetchJson(`/replay/${encodeURIComponent(tid)}/games`);
+    if (reqId !== state.replayReqSeq || state.activeTeamId !== tid) return;
+
+    const games = Array.isArray(data.games) ? data.games : [];
+    state.replayGames = games;
+    renderReplayGamePicker();
+
+    if (games.length === 0) {
+      showReplayStatus("No complete games available for Draft Replay for this team.");
+      if (updateHash) updateUrlHash();
+      return;
+    }
+
+    const chosen =
+      preferredGameId && games.some((g) => g.game_id === preferredGameId)
+        ? preferredGameId
+        : games[0].game_id;
+    await loadReplayGame(tid, chosen, updateHash);
+  } catch (err) {
+    if (reqId !== state.replayReqSeq) return;
+    if (err.status === 503) {
+      render503State(err.detail);
+    } else {
+      els.replayGamePicker.innerHTML = "";
+      showReplayStatus(
+        `<strong>Could not load recent games.</strong> ${escapeHtml(err.detail || err.message)}`
+      );
+    }
+  }
+}
+
+function setActiveView(viewName, preferredGameId = null, updateHash = true) {
+  const canReplay = isTargetTeam(state.activeTeamId);
+  const nextView = viewName === "replay" && canReplay ? "replay" : "silence";
+  state.activeView = nextView;
+  syncActiveViewTabs();
+  if (updateHash) updateUrlHash();
+  if (nextView === "replay" && state.activeTeamId) {
+    loadReplayForTeam(state.activeTeamId, preferredGameId, updateHash);
+  }
+}
+
 /* ---------- Full Report Render ---------- */
 
-function renderReport(report) {
+function renderReport(report, preferredReplayGameId = null) {
   state.report = report;
 
   const isSelf = state.selfScoutMode;
@@ -716,8 +1277,13 @@ function renderReport(report) {
   syncTellFiltersForReport(report);
   renderLeftOpenTells(report);
   renderEarlyBanTable(report);
+  syncActiveViewTabs();
   renderTeamList();
   showReportContent();
+
+  if (state.activeView === "replay" && isTargetTeam(state.activeTeamId)) {
+    loadReplayForTeam(state.activeTeamId, preferredReplayGameId, false);
+  }
 }
 
 /* ---------- Navigation & Data Loading ---------- */
@@ -727,20 +1293,34 @@ function resetReportFilters() {
   state.playerFilter = "all";
   state.tierFilter = "all";
   state.banQuery = "";
+  state.replayFilter = "all";
   els.banSearch.value = "";
 }
 
-async function loadSelfScout(updateHash = true) {
+function resetReplayCacheIfTeamChanged(nextTeamId) {
+  if (state.replayTeamId !== String(nextTeamId)) {
+    state.replayTeamId = null;
+    state.replayGames = [];
+    state.replayGameId = null;
+    state.replayDetail = null;
+    state.replaySlotIdx = 0;
+  }
+}
+
+async function loadSelfScout(updateHash = true, targetView = "silence", replayGameId = null) {
   const reqId = ++state.requestSeq;
   state.selfScoutMode = true;
   state.activeTeamId = SELF_SCOUT_TEAM_ID;
+  state.activeView = targetView === "replay" ? "replay" : "silence";
+  resetReplayCacheIfTeamChanged(SELF_SCOUT_TEAM_ID);
   document.body.classList.add("is-self-scout");
   els.selfScoutToggle.setAttribute("aria-checked", "true");
   els.selfScoutBanner.classList.remove("hidden");
   renderTeamList();
 
-  if (updateHash && window.location.hash !== "#/self-scout") {
-    window.history.replaceState(null, "", "#/self-scout");
+  if (updateHash) {
+    state.replayGameId = replayGameId;
+    updateUrlHash();
   }
 
   resetReportFilters();
@@ -749,7 +1329,7 @@ async function loadSelfScout(updateHash = true) {
   try {
     const report = await fetchJson("/self-scout");
     if (reqId !== state.requestSeq) return;
-    renderReport(report);
+    renderReport(report, replayGameId);
   } catch (err) {
     if (reqId !== state.requestSeq) return;
     if (err.status === 503) {
@@ -762,11 +1342,13 @@ async function loadSelfScout(updateHash = true) {
   }
 }
 
-async function loadTeamReport(teamId, updateHash = true) {
+async function loadTeamReport(teamId, updateHash = true, targetView = "silence", replayGameId = null) {
   const tid = String(teamId);
   const reqId = ++state.requestSeq;
   state.selfScoutMode = false;
   state.activeTeamId = tid;
+  state.activeView = targetView === "replay" && isTargetTeam(tid) ? "replay" : "silence";
+  resetReplayCacheIfTeamChanged(tid);
   if (tid !== SELF_SCOUT_TEAM_ID) {
     state.lastOpponentTeamId = tid;
   }
@@ -775,9 +1357,9 @@ async function loadTeamReport(teamId, updateHash = true) {
   els.selfScoutBanner.classList.add("hidden");
   renderTeamList();
 
-  const targetHash = `#/team/${encodeURIComponent(tid)}`;
-  if (updateHash && window.location.hash !== targetHash) {
-    window.history.replaceState(null, "", targetHash);
+  if (updateHash) {
+    state.replayGameId = replayGameId;
+    updateUrlHash();
   }
 
   resetReportFilters();
@@ -786,7 +1368,7 @@ async function loadTeamReport(teamId, updateHash = true) {
   try {
     const report = await fetchJson(`/silence/${encodeURIComponent(tid)}`);
     if (reqId !== state.requestSeq) return;
-    renderReport(report);
+    renderReport(report, replayGameId);
   } catch (err) {
     if (reqId !== state.requestSeq) return;
     if (err.status === 503) {
@@ -808,16 +1390,29 @@ function getDefaultOpponentId() {
 function routeFromHash() {
   const hash = window.location.hash || "";
   if (hash === "#/self-scout") {
-    loadSelfScout(false);
+    loadSelfScout(false, "silence");
+    return;
+  }
+  const selfReplayMatch = hash.match(/^#\/self-scout\/replay(?:\/(.+))?$/);
+  if (selfReplayMatch) {
+    const gid = selfReplayMatch[1] ? decodeURIComponent(selfReplayMatch[1]) : null;
+    loadSelfScout(false, "replay", gid);
+    return;
+  }
+  const teamReplayMatch = hash.match(/^#\/team\/([^/]+)\/replay(?:\/(.+))?$/);
+  if (teamReplayMatch) {
+    const tid = decodeURIComponent(teamReplayMatch[1]);
+    const gid = teamReplayMatch[2] ? decodeURIComponent(teamReplayMatch[2]) : null;
+    loadTeamReport(tid, false, "replay", gid);
     return;
   }
   const match = hash.match(/^#\/team\/(.+)$/);
   if (match) {
-    loadTeamReport(decodeURIComponent(match[1]), false);
+    loadTeamReport(decodeURIComponent(match[1]), false, "silence");
     return;
   }
   if (state.teams.length > 0) {
-    loadTeamReport(getDefaultOpponentId(), true);
+    loadTeamReport(getDefaultOpponentId(), true, "silence");
   }
 }
 
@@ -920,6 +1515,52 @@ els.banSearch.addEventListener("input", (e) => {
   if (state.report) renderEarlyBanTable(state.report);
 });
 
+els.viewTabs.addEventListener("click", (e) => {
+  const btn = e.target.closest(".view-tab[data-view]");
+  if (!btn || btn.classList.contains("hidden")) return;
+  setActiveView(btn.dataset.view, null, true);
+});
+
+els.replayGamePicker.addEventListener("click", (e) => {
+  const card = e.target.closest(".game-card[data-game-id]");
+  if (!card || !state.activeTeamId) return;
+  const gid = card.dataset.gameId;
+  if (gid && gid !== state.replayGameId) {
+    loadReplayGame(state.activeTeamId, gid, true);
+  }
+});
+
+els.replayPrevBtn.addEventListener("click", () => {
+  if (!state.replayDetail || state.replaySlotIdx <= 0) return;
+  state.replaySlotIdx -= 1;
+  renderReplaySlotView();
+});
+
+els.replayNextBtn.addEventListener("click", () => {
+  if (!state.replayDetail) return;
+  const maxIdx = Math.max(0, (state.replayDetail.slots || []).length - 1);
+  if (state.replaySlotIdx >= maxIdx) return;
+  state.replaySlotIdx += 1;
+  renderReplaySlotView();
+});
+
+els.replayDraftStrip.addEventListener("click", (e) => {
+  const cell = e.target.closest(".draft-cell[data-slot-idx]");
+  if (!cell || !state.replayDetail) return;
+  const idx = Number(cell.dataset.slotIdx);
+  if (Number.isInteger(idx) && idx >= 0 && idx < (state.replayDetail.slots || []).length) {
+    state.replaySlotIdx = idx;
+    renderReplaySlotView();
+  }
+});
+
+els.replayStatePills.addEventListener("click", (e) => {
+  const btn = e.target.closest(".pill[data-replay-filter]");
+  if (!btn || !state.replayDetail) return;
+  state.replayFilter = btn.dataset.replayFilter;
+  renderReplayTellsPanel(state.replayDetail);
+});
+
 els.statePanel.addEventListener("click", (e) => {
   const btn = e.target.closest("[data-action]");
   if (!btn) return;
@@ -944,14 +1585,28 @@ window.addEventListener("hashchange", () => {
 });
 
 document.addEventListener("keydown", (e) => {
-  if (
-    e.key === "/" &&
-    document.activeElement &&
-    !["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName)
-  ) {
+  const activeTag = document.activeElement ? document.activeElement.tagName : "";
+  const inInput = ["INPUT", "TEXTAREA", "SELECT"].includes(activeTag);
+  if (inInput) return;
+
+  if (e.key === "/") {
     e.preventDefault();
     els.teamSearch.focus();
     els.teamSearch.select();
+    return;
+  }
+
+  if (state.activeView === "replay" && state.replayDetail) {
+    const slots = state.replayDetail.slots || [];
+    if (e.key === "ArrowLeft" && state.replaySlotIdx > 0) {
+      e.preventDefault();
+      state.replaySlotIdx -= 1;
+      renderReplaySlotView();
+    } else if (e.key === "ArrowRight" && state.replaySlotIdx < slots.length - 1) {
+      e.preventDefault();
+      state.replaySlotIdx += 1;
+      renderReplaySlotView();
+    }
   }
 });
 

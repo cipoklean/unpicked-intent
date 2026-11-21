@@ -221,7 +221,13 @@ class TestApi:
                 api_mod.DB_PATH = Path(tmpdir) / "nonexistent.duckdb"
                 client = TestClient(api_mod.app)
 
-                for endpoint in ("/teams", "/silence/47351", "/self-scout"):
+                for endpoint in (
+                    "/teams",
+                    "/silence/47351",
+                    "/self-scout",
+                    "/replay/47351/games",
+                    "/replay/47351/RG5_2",
+                ):
                     resp = client.get(endpoint)
                     assert resp.status_code == 503, f"{endpoint} returned {resp.status_code}"
                     detail = resp.json()["detail"]
@@ -244,9 +250,148 @@ class TestApi:
         assert client.get("/teams").status_code == 200
         assert client.get("/silence/47351").status_code == 200
         assert client.get("/self-scout").status_code == 200
+        games_resp = client.get("/replay/47351/games")
+        assert games_resp.status_code == 200
+        first_gid = games_resp.json()["games"][0]["game_id"]
+        assert client.get(f"/replay/47351/{first_gid}").status_code == 200
 
-        assert len(seen_kwargs) == 3
+        assert len(seen_kwargs) == 5
         assert all(kw.get("read_only") is True for kw in seen_kwargs)
+
+    def test_replay_games_returns_5_most_recent_for_target_team(self, synthetic_api_db):
+        """GET /replay/{team_id}/games returns 5 most recent complete games by played_at."""
+        client = TestClient(api_mod.app)
+        resp = client.get("/replay/47351/games")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        assert data["team_id"] == "47351"
+        assert data["team_name"] == "Cloud9 Kia"
+        games = data["games"]
+        assert len(games) == 5
+
+        # Rich synthetic fixture creates 10 games across 2026-11-01..2026-11-05 (G1 at 10:00, G2 at 11:00)
+        assert [g["game_id"] for g in games] == ["RG5_2", "RG5_1", "RG4_2", "RG4_1", "RG3_2"]
+
+        expected_keys = {
+            "game_id", "series_id", "game_num", "played_at",
+            "patch", "opponent_id", "opponent_name", "side",
+        }
+        for g in games:
+            assert set(g.keys()) == expected_keys
+            assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", g["played_at"])
+            assert g["opponent_id"] == "340"
+            assert g["opponent_name"] == "FlyQuest"
+            assert g["side"] == "blue"
+            assert g["patch"] == "16.20"
+
+        # Dates are non-increasing (most recent first)
+        dates = [g["played_at"] for g in games]
+        assert dates == sorted(dates, reverse=True)
+
+    def test_replay_404_for_non_target_team_and_game_outside_top_5(self, synthetic_api_db):
+        """Non-target teams and games outside a target team's 5 most recent must return 404."""
+        client = TestClient(api_mod.app)
+
+        # Non-target team (known in names table as T1, and completely unknown 999999)
+        for non_target in ("T1", "999999"):
+            resp_games = client.get(f"/replay/{non_target}/games")
+            assert resp_games.status_code == 404
+            resp_detail = client.get(f"/replay/{non_target}/RG5_2")
+            assert resp_detail.status_code == 404
+
+        # RG1_1 is a real complete game for 47351, but outside its 5 most recent games
+        resp_old = client.get("/replay/47351/RG1_1")
+        assert resp_old.status_code == 404
+
+        # Non-existent game id for a target team
+        resp_missing = client.get("/replay/47351/NO_SUCH_GAME")
+        assert resp_missing.status_code == 404
+
+    def test_replay_detail_slots_ordered_1_to_20_and_all_tell_states(self, synthetic_api_db):
+        """GET /replay/{team_id}/{game_id} returns 20 ordered slots, Fearless burned, and per-slot tell states."""
+        # Seed deterministic tells for team 47351 covering all 5 possible slot states across RG5_1 & RG5_2:
+        # In RG5_1 (game_num=1):
+        #   - Azir: banned at slot 1 -> banned from slot 1..20
+        #   - Yone: banned at slot 13 -> open slots 1..12, banned slots 13..20
+        #   - Garen: picked by 47351 (blue) at slot 7 -> open slots 1..6, picked_by_team slots 7..20
+        #   - Renekton: picked by 340 (red) at slot 8 -> open slots 1..7, picked_by_opponent slots 8..20
+        #   - Aatrox: never picked or banned in RG5_1 -> open all 20 slots
+        # In RG5_2 (game_num=2, same series RICH-5):
+        #   - Garen & Renekton were picked in RG5_1 -> burned across all 20 slots!
+        #   - Darius: picked by 47351 at slot 7 -> open 1..6, picked_by_team 7..20
+        con = duckdb.connect(str(synthetic_api_db))
+        con.execute("DELETE FROM left_open WHERE team = '47351'")
+        con.executemany(
+            "INSERT INTO left_open VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("47351", "P1", "top", "Aatrox", 7, 3, 4.5, 0.01, 0.15, 0.3),
+                ("47351", "P1", "top", "Garen", 5, 2, 3.0, 0.04, 0.25, 0.2),
+                ("47351", "P1", "top", "Renekton", 6, 1, 3.5, 0.08, 0.35, 0.2),
+                ("47351", "P2", "mid", "Azir", 6, 1, 3.2, 0.10, 0.40, 0.2),
+                ("47351", "P2", "mid", "Yone", 5, 1, 2.5, 0.15, 0.45, 0.2),
+                ("47351", "P1", "top", "Darius", 5, 2, 3.0, 0.20, 0.50, 0.2),
+                # k < 4 must be filtered out just like /silence
+                ("47351", "P4", "bot", "Jinx", 3, 0, 1.5, 0.001, 0.01, 0.5),
+            ],
+        )
+        con.close()
+
+        client = TestClient(api_mod.app)
+
+        # --- Game 1 (RG5_1): nothing burned ---
+        resp_g1 = client.get("/replay/47351/RG5_1")
+        assert resp_g1.status_code == 200
+        g1 = resp_g1.json()
+
+        assert g1["team_id"] == "47351"
+        assert g1["team_name"] == "Cloud9 Kia"
+        assert g1["min_n"] == 4
+        assert g1["note"] == "We only show tells with at least 4 qualifying games."
+        assert g1["burned"] == []
+
+        slots_g1 = g1["slots"]
+        assert len(slots_g1) == 20
+        assert [s["slot"] for s in slots_g1] == list(range(1, 21))
+        allowed_slot_keys = {"slot", "phase", "side", "team_id", "team_name", "action", "champion"}
+        for s in slots_g1:
+            assert set(s.keys()) == allowed_slot_keys
+            assert s["action"] in ("ban", "pick")
+            assert s["side"] in ("blue", "red")
+
+        tells_g1 = {t["champion"]: t for t in g1["tells"]}
+        assert "Jinx" not in tells_g1  # k=3 excluded
+        assert len(tells_g1) == 6
+        assert tells_g1["Aatrox"]["label"] == "strong"
+        assert tells_g1["Garen"]["label"] == "lead"
+
+        # Check exact state trajectories across all 20 slots
+        assert tells_g1["Aatrox"]["slot_states"] == ["open"] * 20
+        assert tells_g1["Azir"]["slot_states"] == ["banned"] * 20
+        assert tells_g1["Yone"]["slot_states"] == ["open"] * 12 + ["banned"] * 8
+        assert tells_g1["Garen"]["slot_states"] == ["open"] * 6 + ["picked_by_team"] * 14
+        assert tells_g1["Renekton"]["slot_states"] == ["open"] * 7 + ["picked_by_opponent"] * 13
+
+        # --- Game 2 (RG5_2): Fearless burned computed from RG5_1 picks in series RICH-5 ---
+        resp_g2 = client.get("/replay/47351/RG5_2")
+        assert resp_g2.status_code == 200
+        g2 = resp_g2.json()
+
+        expected_burned_g2 = sorted(
+            {s["champion"] for s in slots_g1 if s["action"] == "pick"}
+        )
+        assert len(expected_burned_g2) == 10
+        assert g2["burned"] == expected_burned_g2
+        assert [s["slot"] for s in g2["slots"]] == list(range(1, 21))
+
+        tells_g2 = {t["champion"]: t for t in g2["tells"]}
+        # Garen and Renekton were picked in RG5_1 -> burned across all 20 slots of RG5_2
+        assert tells_g2["Garen"]["slot_states"] == ["burned"] * 20
+        assert tells_g2["Renekton"]["slot_states"] == ["burned"] * 20
+        # Darius is picked by 47351 at slot 7 in RG5_2
+        assert tells_g2["Darius"]["slot_states"] == ["open"] * 6 + ["picked_by_team"] * 14
+        # Azir is banned at slot 13 in RG5_2 (index 6 in g2_bans)
+        assert tells_g2["Azir"]["slot_states"] == ["open"] * 12 + ["banned"] * 8
 
 
 class TestWebUI:
@@ -298,15 +443,27 @@ class TestWebUI:
 
         # Extract literal/template URLs passed to fetchJson(...) or fetch(...)
         raw_urls = re.findall(r"""(?:fetchJson|fetch)\(\s*["'`]([^"'`]+)["'`]""", js_text)
-        assert len(raw_urls) >= 3, f"Expected at least 3 API calls in app.js, found {raw_urls}"
+        assert len(raw_urls) >= 5, f"Expected at least 5 API calls in app.js, found {raw_urls}"
 
-        # Normalize JS template expressions like ${encodeURIComponent(tid)} -> 47351
-        concrete_paths = sorted(
-            {re.sub(r"\$\{[^}]+\}", "47351", url) for url in raw_urls}
-        )
+        client = TestClient(api_mod.app)
+        first_game_id = client.get("/replay/47351/games").json()["games"][0]["game_id"]
+
+        def _materialize(url: str) -> str:
+            parts = re.split(r"\$\{[^}]+\}", url)
+            if len(parts) == 1:
+                return url
+            # First template placeholder is team_id; second (if any) is game_id.
+            out = parts[0] + "47351" + parts[1]
+            for extra in parts[2:]:
+                out += first_game_id + extra
+            return out
+
+        concrete_paths = sorted({_materialize(url) for url in raw_urls})
         assert "/teams" in concrete_paths
         assert "/self-scout" in concrete_paths
         assert "/silence/47351" in concrete_paths
+        assert "/replay/47351/games" in concrete_paths
+        assert f"/replay/47351/{first_game_id}" in concrete_paths
 
         # Every extracted path must match a registered FastAPI APIRoute (not StaticFiles)
         api_routes = [r for r in api_mod.app.routes if isinstance(r, APIRoute)]
@@ -318,7 +475,6 @@ class TestWebUI:
             assert matched, f"JS calls '{path}', which does not match any FastAPI APIRoute"
 
         # And every endpoint responds 200 against the synthetic DuckDB
-        client = TestClient(api_mod.app)
         for path in concrete_paths:
             resp = client.get(path)
             assert resp.status_code == 200, f"JS endpoint '{path}' returned {resp.status_code}"
@@ -336,8 +492,12 @@ class TestWebUI:
             "This is what an opponent could read from Cloud9 Kia's own drafts using this report"
             in html
         )
+        assert "We only show tells with at least 4 qualifying games." in html
+        assert "Draft Replay" in html
 
         js = client.get("/app.js").text
         assert "So far, leaving it open has rarely drawn it." in js
         assert "Leaving it open rarely draws it." in js
         assert "ACTION_LEAD_MAX_P = 0.05" in js
+        assert "Open now, history says they skip it" in js
+        assert "data/replay/${rest}.json" in js

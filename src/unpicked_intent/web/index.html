@@ -115,6 +115,35 @@
             </div>
           </section>
 
+          <!-- View Tabs (Silence Report / Draft Replay for target teams) -->
+          <div id="view-tabs" class="view-tabs" role="tablist" aria-label="Team scouting views">
+            <button
+              id="tab-silence"
+              type="button"
+              class="view-tab active"
+              data-view="silence"
+              role="tab"
+              aria-selected="true"
+              aria-controls="silence-view"
+            >
+              Silence Report
+            </button>
+            <button
+              id="tab-replay"
+              type="button"
+              class="view-tab hidden"
+              data-view="replay"
+              role="tab"
+              aria-selected="false"
+              aria-controls="replay-view"
+            >
+              Draft Replay
+              <span class="tab-pill">Recent 5</span>
+            </button>
+          </div>
+
+          <!-- Silence Report View -->
+          <div id="silence-view" class="view-section" role="tabpanel" aria-labelledby="tab-silence">
           <!-- Honesty & Signal Legend Strip -->
           <section class="honesty-bar" aria-label="Statistical methodology and honesty rules">
             <div class="honesty-note">
@@ -213,6 +242,93 @@
 
             <div id="early-ban-container" class="table-scroll"></div>
           </section>
+          </div>
+
+          <!-- Draft Replay View (target teams only) -->
+          <div id="replay-view" class="view-section hidden" role="tabpanel" aria-labelledby="tab-replay">
+            <!-- Replay Honesty Bar -->
+            <section class="honesty-bar" aria-label="Draft replay methodology note">
+              <div class="honesty-note">
+                <span class="honesty-dot" aria-hidden="true"></span>
+                <span id="replay-min-n-note">We only show tells with at least 4 qualifying games.</span>
+              </div>
+              <div class="honesty-explainer">
+                <span class="badge-mini badge-strong">STRONG</span>
+                <span class="badge-mini badge-lead">LEAD</span>
+                <span>
+                  Leads are patterns worth watching; strong tells survive correction for testing thousands of patterns.
+                </span>
+              </div>
+            </section>
+
+            <!-- Recent 5 Games Picker -->
+            <section class="panel replay-games-panel" aria-labelledby="replay-games-heading">
+              <div class="panel-header">
+                <div>
+                  <h2 id="replay-games-heading" class="panel-title">Recent Complete Games (up to 5)</h2>
+                  <p class="panel-sub">
+                    Select a game to step slot-by-slot through the 20-action Fearless Draft and watch when surfaced tells stay open.
+                  </p>
+                </div>
+                <span id="replay-games-count" class="showing-count">0 games</span>
+              </div>
+              <div id="replay-game-picker" class="replay-game-picker" role="listbox" aria-label="Recent games"></div>
+            </section>
+
+            <!-- Replay Error / Empty / Loading Area -->
+            <div id="replay-status" class="replay-status hidden" role="status" aria-live="polite"></div>
+
+            <!-- Active Game Replay Body -->
+            <div id="replay-body" class="replay-body hidden">
+              <!-- Slot Stepper + 20-Cell Draft Strip -->
+              <section class="panel replay-board-panel" aria-labelledby="replay-board-heading">
+                <div class="panel-header replay-stepper-header">
+                  <div>
+                    <h2 id="replay-board-heading" class="panel-title">Draft Slot Stepper</h2>
+                    <p id="replay-game-meta" class="panel-sub">—</p>
+                  </div>
+
+                  <div class="stepper-controls">
+                    <button id="replay-prev-btn" type="button" class="btn stepper-btn" disabled>&larr; Prev</button>
+                    <span id="replay-slot-counter" class="slot-counter">Slot 1 / 20</span>
+                    <button id="replay-next-btn" type="button" class="btn btn-primary stepper-btn">Next &rarr;</button>
+                  </div>
+                </div>
+
+                <!-- Current Slot Callout Banner -->
+                <div id="replay-slot-banner" class="replay-slot-banner"></div>
+
+                <!-- Fearless Burned Strip (hidden when Game 1 / 0 burned) -->
+                <div id="replay-burned-bar" class="replay-burned-bar hidden"></div>
+
+                <!-- 20-Cell Draft Strip (Blue Side Left, Red Side Right) -->
+                <div id="replay-draft-strip" class="replay-draft-strip" aria-label="20-slot draft strip"></div>
+              </section>
+
+              <!-- Tells State at Current Slot -->
+              <section class="panel replay-tells-panel" aria-labelledby="replay-tells-heading">
+                <div class="panel-header tells-header">
+                  <div>
+                    <h2 id="replay-tells-heading" class="panel-title">Team Tells at Current Slot</h2>
+                    <p id="replay-tells-sub" class="panel-sub">
+                      Shows whether each surfaced tell (n &ge; 4) is still open, taken, denied, banned, or burned at this draft slot.
+                    </p>
+                  </div>
+
+                  <div class="replay-tells-controls">
+                    <span id="replay-state-summary" class="showing-count">0 tells</span>
+                    <div id="replay-state-pills" class="pill-group compact-pills" role="group" aria-label="Filter replay tells by state">
+                      <button type="button" class="pill active" data-replay-filter="all">All</button>
+                      <button type="button" class="pill" data-replay-filter="open">Open</button>
+                      <button type="button" class="pill" data-replay-filter="resolved">Unavailable</button>
+                    </div>
+                  </div>
+                </div>
+
+                <div id="replay-tells-container" class="tells-container"></div>
+              </section>
+            </div>
+          </div>
         </div>
       </main>
     </div>
