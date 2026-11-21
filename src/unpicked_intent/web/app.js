@@ -32,25 +32,25 @@ const ROLE_LABELS = {
   support: "Support",
 };
 const ROLE_SHORT = {
-  top: "TOP",
-  jungle: "JGL",
-  mid: "MID",
-  bot: "BOT",
-  support: "SUP",
+  top: "Top",
+  jungle: "Jgl",
+  mid: "Mid",
+  bot: "Bot",
+  support: "Sup",
 };
 
 const PHASE_ORDER = ["ban1", "pick1", "ban2", "pick2"];
 const PHASE_LABELS = {
-  ban1: "Ban Phase 1 · Slots 1–6",
-  pick1: "Pick Phase 1 · Slots 7–12",
-  ban2: "Ban Phase 2 · Slots 13–16",
-  pick2: "Pick Phase 2 · Slots 17–20",
+  ban1: "Ban phase 1 · slots 1–6",
+  pick1: "Pick phase 1 · slots 7–12",
+  ban2: "Ban phase 2 · slots 13–16",
+  pick2: "Pick phase 2 · slots 17–20",
 };
 const PHASE_SHORT = {
-  ban1: "BAN 1",
-  pick1: "PICK 1",
-  ban2: "BAN 2",
-  pick2: "PICK 2",
+  ban1: "Ban 1",
+  pick1: "Pick 1",
+  ban2: "Ban 2",
+  pick2: "Pick 2",
 };
 
 const state = {
@@ -97,6 +97,7 @@ const els = {
   kpiStrongSub: document.getElementById("kpi-strong-sub"),
   kpiLeadCount: document.getElementById("kpi-lead-count"),
   kpiEarlyBanCount: document.getElementById("kpi-early-ban-count"),
+  kpiPatternsTestedCount: document.getElementById("kpi-patterns-tested-count"),
   viewTabs: document.getElementById("view-tabs"),
   tabSilence: document.getElementById("tab-silence"),
   tabReplay: document.getElementById("tab-replay"),
@@ -124,6 +125,7 @@ const els = {
   replayGameMeta: document.getElementById("replay-game-meta"),
   replayPrevBtn: document.getElementById("replay-prev-btn"),
   replayNextBtn: document.getElementById("replay-next-btn"),
+  replayNextOpenTellBtn: document.getElementById("replay-next-open-tell-btn"),
   replaySlotCounter: document.getElementById("replay-slot-counter"),
   replaySlotBanner: document.getElementById("replay-slot-banner"),
   replayBurnedBar: document.getElementById("replay-burned-bar"),
@@ -327,11 +329,11 @@ function renderTeamList() {
 
   const parts = [];
   if (targetTeams.length > 0) {
-    parts.push(`<div class="rail-section-label">LCS Targets (${targetTeams.length})</div>`);
+    parts.push(`<div class="rail-section-label">LCS targets (${targetTeams.length})</div>`);
     parts.push(...targetTeams.map(renderTeamButtonHtml));
   }
   if (otherTeams.length > 0) {
-    parts.push(`<div class="rail-section-label">All Other Teams (${otherTeams.length})</div>`);
+    parts.push(`<div class="rail-section-label">All other teams (${otherTeams.length})</div>`);
     parts.push(...otherTeams.map(renderTeamButtonHtml));
   }
   els.teamList.innerHTML = parts.join("");
@@ -342,7 +344,7 @@ function renderTeamButtonHtml(team) {
   const isActive =
     (state.selfScoutMode && tid === SELF_SCOUT_TEAM_ID) ||
     (!state.selfScoutMode && state.activeTeamId === tid);
-  const c9Tag = tid === SELF_SCOUT_TEAM_ID ? `<span class="c9-tag">SELF</span>` : "";
+  const c9Tag = tid === SELF_SCOUT_TEAM_ID ? `<span class="c9-tag">Self</span>` : "";
 
   return `<button
     type="button"
@@ -577,9 +579,6 @@ function renderTellRowHtml(tell) {
         <div class="rate-bar-exp" style="left: ${expPct.toFixed(1)}%"></div>
       </div>
     </td>
-    <td class="num">${k}</td>
-    <td class="num">${taken}</td>
-    <td class="num">${formatExpected(expected)}</td>
     <td class="num p-val">${formatProb(tell.p_value)}</td>
     <td class="num ${isStrong ? "q-strong" : "q-lead"}">${formatProb(tell.q_value)}</td>
   </tr>`;
@@ -593,10 +592,7 @@ function renderTellsTableHtml(rows) {
           <th>Tier</th>
           <th>Champion</th>
           <th>Player</th>
-          <th>Observed vs. Expected (n open games)</th>
-          <th class="num">n</th>
-          <th class="num">Obs</th>
-          <th class="num">Exp</th>
+          <th>Observed vs expected (n open games)</th>
           <th class="num">p</th>
           <th class="num">q</th>
         </tr>
@@ -735,9 +731,9 @@ function renderEarlyBanTable(report) {
       <tr>
         <th>Champion</th>
         <th class="num">Bans (n)</th>
-        <th class="num">Team Avg Slot</th>
-        <th class="num">Meta Avg Slot</th>
-        <th>Slot Shift (1 &rarr; 20)</th>
+        <th class="num">Team avg slot</th>
+        <th class="num">Meta avg slot</th>
+        <th>Slot shift (1 &rarr; 20)</th>
         <th class="num">Delta</th>
       </tr>
     </thead>
@@ -822,7 +818,7 @@ function renderReplayGamePicker() {
       const isActive = g.game_id === state.replayGameId;
       const sideKey = String(g.side || "").toLowerCase();
       const sideCls = sideKey === "blue" ? "side-blue" : "side-red";
-      const sideLabel = sideKey === "blue" ? "BLUE" : "RED";
+      const sideLabel = sideKey === "blue" ? "Blue" : "Red";
       const fearlessCls = Number(g.game_num) >= 2 ? "is-fearless" : "";
 
       return `<button
@@ -846,6 +842,34 @@ function renderReplayGamePicker() {
     .join("");
 }
 
+function findNextOpenTellSlotIdx(detail, fromIdx) {
+  if (!detail) return -1;
+  const slots = Array.isArray(detail.slots) ? detail.slots : [];
+  const tells = Array.isArray(detail.tells) ? detail.tells : [];
+  if (slots.length === 0 || tells.length === 0) return -1;
+
+  const targetTeamId = String(detail.team_id);
+  const start = Math.max(0, Number(fromIdx) + 1);
+  for (let idx = start; idx < slots.length; idx += 1) {
+    const slot = slots[idx];
+    if (!slot || String(slot.team_id) !== targetTeamId) continue;
+    const hasOpenTell = tells.some(
+      (tell) => Array.isArray(tell.slot_states) && tell.slot_states[idx] === "open"
+    );
+    if (hasOpenTell) return idx;
+  }
+  return -1;
+}
+
+function advanceToNextOpenTellSlot() {
+  if (!state.replayDetail) return false;
+  const nextIdx = findNextOpenTellSlotIdx(state.replayDetail, state.replaySlotIdx);
+  if (nextIdx < 0) return false;
+  state.replaySlotIdx = nextIdx;
+  renderReplaySlotView();
+  return true;
+}
+
 function renderReplayDraftStrip(detail) {
   const slots = Array.isArray(detail.slots) ? detail.slots : [];
   const currentIdx = Math.min(Math.max(0, state.replaySlotIdx), Math.max(0, slots.length - 1));
@@ -854,19 +878,19 @@ function renderReplayDraftStrip(detail) {
   // Determine Blue and Red team labels from slots
   const blueSlot = slots.find((s) => s.side === "blue");
   const redSlot = slots.find((s) => s.side === "red");
-  const blueTeamName = blueSlot ? blueSlot.team_name : "Blue Side";
-  const redTeamName = redSlot ? redSlot.team_name : "Red Side";
+  const blueTeamName = blueSlot ? blueSlot.team_name : "Blue side";
+  const redTeamName = redSlot ? redSlot.team_name : "Red side";
   const blueIsScouted = blueSlot && String(blueSlot.team_id) === String(detail.team_id);
   const redIsScouted = redSlot && String(redSlot.team_id) === String(detail.team_id);
 
   const headerHtml = `<div class="draft-sides-header">
     <div class="draft-side-title side-blue">
-      <span>BLUE · ${escapeHtml(blueTeamName)}</span>
-      ${blueIsScouted ? `<span class="scouted-tag">SCOUTED</span>` : ""}
+      <span>Blue · ${escapeHtml(blueTeamName)}</span>
+      ${blueIsScouted ? `<span class="scouted-tag">Scouted</span>` : ""}
     </div>
     <div class="draft-side-title side-red">
-      <span>RED · ${escapeHtml(redTeamName)}</span>
-      ${redIsScouted ? `<span class="scouted-tag">SCOUTED</span>` : ""}
+      <span>Red · ${escapeHtml(redTeamName)}</span>
+      ${redIsScouted ? `<span class="scouted-tag">Scouted</span>` : ""}
     </div>
   </div>`;
 
@@ -886,8 +910,8 @@ function renderReplayDraftStrip(detail) {
       const actionCls = isBan ? "action-ban" : "action-pick";
       const stateCls = isCurrent ? "is-current" : isFuture ? "is-future" : "is-past";
       const actionTag = isBan
-        ? `<span class="draft-action-tag tag-ban">BAN</span>`
-        : `<span class="draft-action-tag tag-pick">PICK</span>`;
+        ? `<span class="draft-action-tag tag-ban">Ban</span>`
+        : `<span class="draft-action-tag tag-pick">Pick</span>`;
 
       return `<button
         type="button"
@@ -918,17 +942,19 @@ function renderReplayDraftStrip(detail) {
   // Update stepper controls & current slot banner
   els.replayPrevBtn.disabled = currentIdx <= 0;
   els.replayNextBtn.disabled = currentIdx >= slots.length - 1;
+  const nextOpenTellIdx = findNextOpenTellSlotIdx(detail, currentIdx);
+  els.replayNextOpenTellBtn.disabled = nextOpenTellIdx < 0;
   els.replaySlotCounter.textContent =
     slots.length > 0 ? `Slot ${currentSlot.slot} / ${slots.length}` : "No slots";
 
   if (currentSlot) {
     const isTargetActing = String(currentSlot.team_id) === String(detail.team_id);
     const sideCls = currentSlot.side === "blue" ? "side-blue" : "side-red";
-    const sideLabel = currentSlot.side === "blue" ? "BLUE" : "RED";
+    const sideLabel = currentSlot.side === "blue" ? "Blue" : "Red";
     const phaseLabel = PHASE_SHORT[currentSlot.phase] || currentSlot.phase;
     const verb = currentSlot.action === "ban" ? "banned" : "picked";
     const actingPill = isTargetActing
-      ? `<span class="acting-pill">${escapeHtml(detail.team_name)} ACTING</span>`
+      ? `<span class="acting-pill">${escapeHtml(detail.team_name)} acting</span>`
       : "";
 
     els.replaySlotBanner.className = `replay-slot-banner ${isTargetActing ? "is-target-acting" : ""}`.trim();
@@ -942,7 +968,7 @@ function renderReplayDraftStrip(detail) {
         </span>
         ${actingPill}
       </div>
-      <span class="slot-kbd-hint">&larr; / &rarr; keys step</span>
+      <span class="slot-kbd-hint">&larr; / &rarr; step &middot; n next open tell</span>
     `;
   } else {
     els.replaySlotBanner.className = "replay-slot-banner";
@@ -967,7 +993,7 @@ function renderReplayBurnedBar(detail) {
     .join("");
 
   els.replayBurnedBar.innerHTML = `
-    <span class="burned-bar-label">Fearless Burned (${burned.length} from earlier games):</span>
+    <span class="burned-bar-label">Fearless burned (${burned.length} from earlier games):</span>
     ${chips}
   `;
   els.replayBurnedBar.classList.remove("hidden");
@@ -1071,7 +1097,7 @@ function renderReplayTellsPanel(detail) {
         stateHtml = `<span class="state-badge state-burned">Burned (Fearless)</span>`;
       }
       if (changedHere) {
-        stateHtml += `<span class="this-slot-tag">this slot</span>`;
+        stateHtml += `<span class="this-slot-tag">This slot</span>`;
       }
 
       const rowClasses = [
@@ -1105,9 +1131,6 @@ function renderReplayTellsPanel(detail) {
             <div class="rate-bar-exp" style="left: ${expPct.toFixed(1)}%"></div>
           </div>
         </td>
-        <td class="num">${k}</td>
-        <td class="num">${taken}</td>
-        <td class="num">${formatExpected(expected)}</td>
         <td class="num p-val">${formatProb(tell.p_value)}</td>
         <td class="num ${isStrong ? "q-strong" : "q-lead"}">${formatProb(tell.q_value)}</td>
       </tr>`;
@@ -1121,11 +1144,8 @@ function renderReplayTellsPanel(detail) {
           <th>Tier</th>
           <th>Champion</th>
           <th>Player</th>
-          <th>State at Slot ${currentSlot ? Number(currentSlot.slot) : 1}</th>
-          <th>Observed vs. Expected (n open games)</th>
-          <th class="num">n</th>
-          <th class="num">Obs</th>
-          <th class="num">Exp</th>
+          <th>State at slot ${currentSlot ? Number(currentSlot.slot) : 1}</th>
+          <th>Observed vs expected (n open games)</th>
           <th class="num">p</th>
           <th class="num">q</th>
         </tr>
@@ -1139,7 +1159,8 @@ function renderReplaySlotView() {
   if (!state.replayDetail) return;
   const detail = state.replayDetail;
   const g = detail.game || {};
-  const sideLabel = String(g.side || "").toUpperCase();
+  const sideKey = String(g.side || "").toLowerCase();
+  const sideLabel = sideKey === "blue" ? "Blue" : sideKey === "red" ? "Red" : String(g.side || "");
   els.replayGameMeta.textContent =
     `${detail.team_name} (${sideLabel}) vs ${g.opponent_name || g.opponent_id} · Game ${g.game_num} · ${g.played_at || "—"} · Patch ${g.patch || "—"}`;
   els.replayMinNNote.textContent =
@@ -1159,6 +1180,7 @@ async function loadReplayGame(teamId, gameId, updateHash = true) {
   state.replayGameId = gid;
   state.replayDetail = null;
   state.replaySlotIdx = 0;
+  els.replayNextOpenTellBtn.disabled = true;
   renderReplayGamePicker();
   if (updateHash) updateUrlHash();
   showReplayStatus(`Loading 20-slot draft replay…`);
@@ -1263,8 +1285,8 @@ function renderReport(report, preferredReplayGameId = null) {
   els.selfScoutBanner.classList.toggle("hidden", !isSelf);
 
   els.reportModeEyebrow.textContent = isSelf
-    ? "SELF-SCOUT · WHAT OPPONENTS CAN READ ABOUT US"
-    : "OPPONENT SILENCE REPORT";
+    ? "Self-scout · what opponents can read about us"
+    : "Opponent silence report";
   els.reportTeamName.textContent = report.team_name || report.team_id;
 
   const tells = Array.isArray(report.left_open) ? report.left_open : [];
@@ -1278,6 +1300,10 @@ function renderReport(report, preferredReplayGameId = null) {
   els.kpiStrongSub.classList.toggle("hidden", hasStrong);
   els.kpiLeadCount.textContent = String(leadCount);
   els.kpiEarlyBanCount.textContent = String(bans.length);
+  if (els.kpiPatternsTestedCount) {
+    els.kpiPatternsTestedCount.textContent =
+      state.totalTests !== null ? state.totalTests.toLocaleString("en-US") : "—";
+  }
 
   els.reportMinNNote.textContent =
     report.note || "Only tells with at least 4 qualifying games are shown.";
@@ -1397,6 +1423,9 @@ function renderTotalTestsCount(totalTests) {
   document.querySelectorAll(".total-tests-count").forEach((el) => {
     el.textContent = formatted;
   });
+  if (els.kpiPatternsTestedCount) {
+    els.kpiPatternsTestedCount.textContent = formatted;
+  }
 }
 
 function getDefaultOpponentId() {
@@ -1579,6 +1608,10 @@ els.replayNextBtn.addEventListener("click", () => {
   renderReplaySlotView();
 });
 
+els.replayNextOpenTellBtn.addEventListener("click", () => {
+  advanceToNextOpenTellSlot();
+});
+
 els.replayDraftStrip.addEventListener("click", (e) => {
   const cell = e.target.closest(".draft-cell[data-slot-idx]");
   if (!cell || !state.replayDetail) return;
@@ -1641,6 +1674,15 @@ document.addEventListener("keydown", (e) => {
       e.preventDefault();
       state.replaySlotIdx += 1;
       renderReplaySlotView();
+    } else if (
+      (e.key === "n" || e.key === "N") &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.altKey
+    ) {
+      if (advanceToNextOpenTellSlot()) {
+        e.preventDefault();
+      }
     }
   }
 });

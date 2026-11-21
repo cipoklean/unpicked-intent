@@ -7,7 +7,9 @@ pipeline and exercises all endpoints using FastAPI's TestClient.
 from __future__ import annotations
 
 import csv
+import json
 import re
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -582,3 +584,192 @@ class TestWebUI:
         css = client.get("/styles.css").text
         assert ".kpi-chip.kpi-strong.kpi-strong-zero" in css
         assert ".kpi-sub" in css
+
+    def test_ui_polish_passes_contract(self):
+        """Verify Passes 1-4: sentence-case labels, quiet KPI + Patterns tested, 6-col tells, muted accents."""
+        client = TestClient(api_mod.app)
+        html = client.get("/").text
+        css = client.get("/styles.css").text
+        js = client.get("/app.js").text
+
+        # PASS 1: uppercase CSS restricted strictly to badge chips (.badge-signal / .badge-mini)
+        assert css.count("text-transform: uppercase") == 1
+        assert "Opponent silence report" in html
+        assert "OPPONENT SILENCE REPORT" not in html
+        assert "OPPONENT SILENCE REPORT" not in js
+        assert "LCS targets (" in js
+        assert "All other teams (" in js
+        assert '<span class="c9-tag">Self</span>' in js
+        assert '<span class="c9-tag">SELF</span>' not in js
+
+        # PASS 2: quiet KPI strip (no amber .kpi-strong box) + 4th Patterns tested chip (not hardcoded)
+        assert ".kpi-chip.kpi-strong {" not in css
+        assert ".kpi-chip.kpi-strong .kpi-value {" not in css
+        assert '<span class="kpi-label">Patterns tested</span>' in html
+        assert '<span id="kpi-patterns-tested-count" class="kpi-value">&mdash;</span>' in html
+        assert "kpiPatternsTestedCount" in js
+
+        # PASS 3: Left-Open Tells table drops duplicate n/Obs/Exp columns and uses exact headers
+        assert "<th>Tier</th>" in js
+        assert "<th>Champion</th>" in js
+        assert "<th>Player</th>" in js
+        assert "<th>Observed vs expected (n open games)</th>" in js
+        assert '<th class="num">p</th>' in js
+        assert '<th class="num">q</th>' in js
+        assert '<th class="num">n</th>' not in js
+        assert '<th class="num">Obs</th>' not in js
+        assert '<th class="num">Exp</th>' not in js
+
+        # PASS 4: accent consolidation & no gradients
+        assert "linear-gradient" not in css
+        eyebrow_block = re.search(r"\.report-mode-eyebrow\s*\{[^}]*\}", css)
+        assert eyebrow_block is not None
+        assert "color: var(--text-muted);" in eyebrow_block.group(0)
+        assert "var(--accent)" not in eyebrow_block.group(0)
+
+        dot_block = re.search(r"\.honesty-dot\s*\{[^}]*\}", css)
+        assert dot_block is not None
+        assert "background: var(--text-muted);" in dot_block.group(0)
+
+        search_icon_block = re.search(r"\.search-icon\s*\{[^}]*\}", css)
+        assert search_icon_block is not None
+        assert "color: var(--text-muted);" in search_icon_block.group(0)
+
+    def test_replay_next_open_tell_advances_and_disables(self, synthetic_api_db):
+        """Next open tell advances to the next team-acting slot with an open tell and disables when exhausted."""
+        client = TestClient(api_mod.app)
+        html = client.get("/").text
+        js_path = api_mod.WEB_DIR / "app.js"
+        js_text = js_path.read_text(encoding="utf-8")
+
+        # Markup & shortcut contract
+        stepper_match = re.search(
+            r'<div class="stepper-controls">[\s\S]*?</div>', html
+        )
+        assert stepper_match is not None
+        stepper_html = stepper_match.group(0)
+        assert 'id="replay-prev-btn"' in stepper_html
+        assert 'id="replay-next-btn"' in stepper_html
+        assert 'id="replay-next-open-tell-btn"' in stepper_html
+        assert "Next open tell" in stepper_html
+        assert 'e.key === "n"' in js_text
+
+        # Real replay payload from fixture DB
+        games = client.get("/replay/47351/games").json()["games"]
+        assert len(games) > 0
+        real_detail = client.get(f"/replay/47351/{games[0]['game_id']}").json()
+
+        # Execute the real JS helper functions from app.js in Node
+        node_script = r"""
+const fs = require("fs");
+const jsPath = process.argv[1];
+const detailJson = fs.readFileSync(0, "utf8");
+const src = fs.readFileSync(jsPath, "utf8");
+
+const fnFind = src.match(/function findNextOpenTellSlotIdx\(detail, fromIdx\) \{[\s\S]*?\n\}/);
+const fnAdvance = src.match(/function advanceToNextOpenTellSlot\(\) \{[\s\S]*?\n\}/);
+if (!fnFind || !fnAdvance) {
+  throw new Error("Missing findNextOpenTellSlotIdx or advanceToNextOpenTellSlot in app.js");
+}
+
+const state = { replayDetail: null, replaySlotIdx: 0 };
+const btn = { disabled: true };
+let renders = 0;
+function renderReplaySlotView() {
+  renders += 1;
+  btn.disabled = findNextOpenTellSlotIdx(state.replayDetail, state.replaySlotIdx) < 0;
+}
+
+eval(fnFind[0] + "\n" + fnAdvance[0]);
+
+// 1. Controlled synthetic detail:
+// slot 0: opp acting (open) -> skipped
+// slot 1: team acting, tell A open -> QUALIFIES (idx 1)
+// slot 2: opp acting (open) -> skipped
+// slot 3: team acting, both tells closed (banned / picked_by_opponent) -> skipped
+// slot 4: team acting, tell B open -> QUALIFIES (idx 4)
+// slot 5: team acting, both tells closed -> exhausted
+const synthDetail = {
+  team_id: "47351",
+  slots: [
+    { slot: 1, team_id: "340" },
+    { slot: 2, team_id: "47351" },
+    { slot: 3, team_id: "340" },
+    { slot: 4, team_id: "47351" },
+    { slot: 5, team_id: "47351" },
+    { slot: 6, team_id: "47351" },
+  ],
+  tells: [
+    { champion: "Azir", slot_states: ["open", "open", "banned", "banned", "banned", "banned"] },
+    { champion: "Orianna", slot_states: ["burned", "burned", "burned", "picked_by_opponent", "open", "picked_by_team"] },
+  ],
+};
+
+state.replayDetail = synthDetail;
+state.replaySlotIdx = 0;
+renderReplaySlotView();
+if (btn.disabled !== false) throw new Error("Expected button enabled at slot 0");
+
+if (!advanceToNextOpenTellSlot() || state.replaySlotIdx !== 1) {
+  throw new Error("Expected first jump to idx 1, got " + state.replaySlotIdx);
+}
+if (btn.disabled !== false) throw new Error("Expected button still enabled at idx 1");
+
+if (!advanceToNextOpenTellSlot() || state.replaySlotIdx !== 4) {
+  throw new Error("Expected second jump to idx 4, got " + state.replaySlotIdx);
+}
+if (btn.disabled !== true) throw new Error("Expected button disabled once exhausted at idx 4");
+
+// No wrap when exhausted
+if (advanceToNextOpenTellSlot() !== false || state.replaySlotIdx !== 4) {
+  throw new Error("Expected exhausted jump to return false without wrapping");
+}
+
+// Re-enables on game change
+const freshGame = {
+  team_id: "47351",
+  slots: [
+    { slot: 1, team_id: "340" },
+    { slot: 2, team_id: "47351" },
+  ],
+  tells: [{ champion: "Azir", slot_states: ["open", "open"] }],
+};
+state.replayDetail = freshGame;
+state.replaySlotIdx = 0;
+renderReplaySlotView();
+if (btn.disabled !== false) throw new Error("Expected button re-enabled on game change");
+
+// 2. Real replay payload from TestClient
+const realDetail = JSON.parse(detailJson);
+state.replayDetail = realDetail;
+state.replaySlotIdx = 0;
+renderReplaySlotView();
+
+const visited = [];
+while (advanceToNextOpenTellSlot()) {
+  const idx = state.replaySlotIdx;
+  visited.push(idx);
+  const slot = realDetail.slots[idx];
+  if (String(slot.team_id) !== String(realDetail.team_id)) {
+    throw new Error("Jumped to non-team slot " + idx);
+  }
+  const hasOpen = realDetail.tells.some((t) => t.slot_states[idx] === "open");
+  if (!hasOpen) {
+    throw new Error("Jumped to slot with no open tells: " + idx);
+  }
+}
+if (visited.length === 0) throw new Error("Expected at least one qualifying slot in fixture replay");
+if (btn.disabled !== true) throw new Error("Expected button disabled after exhausting fixture replay");
+
+console.log(JSON.stringify({ visited, renders }));
+"""
+        proc = subprocess.run(
+            ["node", "-e", node_script, str(js_path)],
+            input=json.dumps(real_detail),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 0, f"Node test failed:\nSTDOUT: {proc.stdout}\nSTDERR: {proc.stderr}"
+        result = json.loads(proc.stdout.strip())
+        assert len(result["visited"]) > 0

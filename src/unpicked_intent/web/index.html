@@ -78,7 +78,7 @@
       <main id="report-pane" class="report-pane" tabindex="-1">
         <!-- Self-Scout Reframe Banner (hidden in opponent mode) -->
         <section id="self-scout-banner" class="self-scout-banner hidden" aria-label="Self-scout context">
-          <div class="self-scout-banner-tag">SELF-SCOUT · MIRROR VIEW</div>
+          <div class="self-scout-banner-tag">Self-scout · mirror view</div>
           <div class="self-scout-banner-copy">
             <strong>What opponents can read about us.</strong>
             <span>
@@ -95,7 +95,7 @@
           <!-- Report Header -->
           <section class="report-header">
             <div class="report-title-block">
-              <div class="report-mode-eyebrow" id="report-mode-eyebrow">OPPONENT SILENCE REPORT</div>
+              <div class="report-mode-eyebrow" id="report-mode-eyebrow">Opponent silence report</div>
               <h1 id="report-team-name" class="report-team-name">—</h1>
             </div>
 
@@ -112,6 +112,10 @@
               <div class="kpi-chip">
                 <span class="kpi-label">Early-ban entries (n &ge; 4)</span>
                 <span id="kpi-early-ban-count" class="kpi-value">0</span>
+              </div>
+              <div class="kpi-chip">
+                <span class="kpi-label">Patterns tested</span>
+                <span id="kpi-patterns-tested-count" class="kpi-value">&mdash;</span>
               </div>
             </div>
           </section>
@@ -293,6 +297,15 @@
                     <button id="replay-prev-btn" type="button" class="btn stepper-btn" disabled>&larr; Prev</button>
                     <span id="replay-slot-counter" class="slot-counter">Slot 1 / 20</span>
                     <button id="replay-next-btn" type="button" class="btn btn-primary stepper-btn">Next &rarr;</button>
+                    <button
+                      id="replay-next-open-tell-btn"
+                      type="button"
+                      class="btn stepper-btn"
+                      title="Jump to next slot where this team acts with an open tell (shortcut: n)"
+                      disabled
+                    >
+                      Next open tell
+                    </button>
                   </div>
                 </div>
 
