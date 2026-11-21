@@ -13,7 +13,7 @@ the story is what happened next: after every push, an independent run on the
 full GRID dataset (1,716 pro games) checked the result against known totals,
 and that run found **15 real-data bugs that every green test had missed**.
 Each one went back to Junie as a fix prompt, and each fix added a test that
-would have caught it. The suite grew from 20 tests to 142.
+would have caught it. The suite grew from 20 tests to 145.
 
 ## Setup
 
@@ -100,6 +100,7 @@ Junie implemented; decisions that change what the tool *claims* stayed with me:
 | 2026-11-20 | 62d5eaf | Static site exporter (`export_static.py`) for Vercel, `app.js` `data-static="1"` switch, `dist/` data boundary & Deploy README | 137 |
 | 2026-11-20 | 8a3a9ad | Fix pytest deleting real `derived/unpicked.duckdb` (#14), audit test `unlink`s, add real-DB guard test | 138 |
 | 2026-11-20 | 0dc8e45 | Replace DuckDB `executemany` with CSV `COPY` `_bulk_insert` across build/baseline/signals (#15), timing logs, checksum equivalence test | 139 |
-| 2026-11-20 | pending | Full code/lint/CI cleanup (0 ruff errors, O(N) legal-pool grouping, dead-code removal, `played_at` sort fallback, `pipeline/run_all.py` single-command runner, `.gitignore`/`.aiignore` fixes) & hackathon README curation | 142 |
+| 2026-11-20 | 5109d79 | Full code/lint/CI cleanup (0 ruff errors, O(N) legal-pool grouping, dead-code removal, `played_at` sort fallback, `pipeline/run_all.py` single-command runner, `.gitignore`/`.aiignore` fixes) & hackathon README curation | 142 |
+| 2026-11-21 | a841dbc | Draft Replay view: target-team 5-game replay API (`/replay/{team_id}/games`, `/replay/{team_id}/{game_id}`) with Fearless burned + per-slot tell states, static exporter support, 20-cell Blue/Red slot stepper UI, and API/export tests | 145 |
 
-*Current status: scouting API, offline web UI, and static Vercel site live at https://unpicked-intent.vercel.app. Next: capture PyCharm/Junie session screenshots (before ~Dec 20 Pro trial expiry) and record the ≤3 min demo video (by Jan 5).*
+*Current status: scouting API, offline Silence Report + Draft Replay web UI, and static Vercel site live at https://unpicked-intent.vercel.app. Next: re-export and redeploy Draft Replay to Vercel, capture PyCharm/Junie session screenshots (before ~Dec 20 Pro trial expiry), and record the ≤3 min demo video (by Jan 5).*
