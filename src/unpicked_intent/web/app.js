@@ -848,12 +848,17 @@ function findNextOpenTellSlotIdx(detail, fromIdx) {
   const tells = Array.isArray(detail.tells) ? detail.tells : [];
   if (slots.length === 0 || tells.length === 0) return -1;
 
+  const actionableTells = tells.filter(
+    (tell) => tell && (tell.label === "strong" || isQualifyingActionLead(tell))
+  );
+  if (actionableTells.length === 0) return -1;
+
   const targetTeamId = String(detail.team_id);
   const start = Math.max(0, Number(fromIdx) + 1);
   for (let idx = start; idx < slots.length; idx += 1) {
     const slot = slots[idx];
-    if (!slot || String(slot.team_id) !== targetTeamId) continue;
-    const hasOpenTell = tells.some(
+    if (!slot || String(slot.team_id) !== targetTeamId || slot.action !== "pick") continue;
+    const hasOpenTell = actionableTells.some(
       (tell) => Array.isArray(tell.slot_states) && tell.slot_states[idx] === "open"
     );
     if (hasOpenTell) return idx;

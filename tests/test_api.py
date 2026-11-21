@@ -636,7 +636,7 @@ class TestWebUI:
         assert "color: var(--text-muted);" in search_icon_block.group(0)
 
     def test_replay_next_open_tell_advances_and_disables(self, synthetic_api_db):
-        """Next open tell advances to the next team-acting slot with an open tell and disables when exhausted."""
+        """Next open tell jumps only to team pick slots with an open strong or p < 0.05 lead tell and disables when exhausted."""
         client = TestClient(api_mod.app)
         html = client.get("/").text
         js_path = api_mod.WEB_DIR / "app.js"
@@ -651,6 +651,10 @@ class TestWebUI:
         assert 'id="replay-prev-btn"' in stepper_html
         assert 'id="replay-next-btn"' in stepper_html
         assert 'id="replay-next-open-tell-btn"' in stepper_html
+        assert (
+            'title="Next pick where a strong tell or p < 0.05 lead is still open"'
+            in stepper_html
+        )
         assert "Next open tell" in stepper_html
         assert 'e.key === "n"' in js_text
 
@@ -666,10 +670,15 @@ const jsPath = process.argv[1];
 const detailJson = fs.readFileSync(0, "utf8");
 const src = fs.readFileSync(jsPath, "utf8");
 
+const constMaxP = src.match(/const ACTION_LEAD_MAX_P = [^;]+;/);
+const fnLead = src.match(/function isQualifyingActionLead\(tell\) \{[\s\S]*?\n\}/);
 const fnFind = src.match(/function findNextOpenTellSlotIdx\(detail, fromIdx\) \{[\s\S]*?\n\}/);
 const fnAdvance = src.match(/function advanceToNextOpenTellSlot\(\) \{[\s\S]*?\n\}/);
-if (!fnFind || !fnAdvance) {
-  throw new Error("Missing findNextOpenTellSlotIdx or advanceToNextOpenTellSlot in app.js");
+if (!constMaxP || !fnLead || !fnFind || !fnAdvance) {
+  throw new Error("Missing action-lead or next-open-tell helpers in app.js");
+}
+if (!fnFind[0].includes("isQualifyingActionLead")) {
+  throw new Error("findNextOpenTellSlotIdx must reuse isQualifyingActionLead");
 }
 
 const state = { replayDetail: null, replaySlotIdx: 0 };
@@ -680,28 +689,58 @@ function renderReplaySlotView() {
   btn.disabled = findNextOpenTellSlotIdx(state.replayDetail, state.replaySlotIdx) < 0;
 }
 
-eval(fnFind[0] + "\n" + fnAdvance[0]);
+eval(constMaxP[0] + "\n" + fnLead[0] + "\n" + fnFind[0] + "\n" + fnAdvance[0]);
 
-// 1. Controlled synthetic detail:
-// slot 0: opp acting (open) -> skipped
-// slot 1: team acting, tell A open -> QUALIFIES (idx 1)
-// slot 2: opp acting (open) -> skipped
-// slot 3: team acting, both tells closed (banned / picked_by_opponent) -> skipped
-// slot 4: team acting, tell B open -> QUALIFIES (idx 4)
-// slot 5: team acting, both tells closed -> exhausted
+// 1. Controlled synthetic detail covering:
+// - slot 0: opp ban (strong open) -> skipped
+// - slot 1: team BAN with strong & qualifying lead open -> SKIPPED (ban, not pick)
+// - slot 2: team PICK where only p >= 0.05 leads are open (0.05 boundary & 0.12) -> SKIPPED
+// - slot 3: opp PICK with strong open -> SKIPPED (opponent slot)
+// - slot 4: team PICK with STRONG tell open -> QUALIFIES (idx 4)
+// - slot 5: team BAN with qualifying lead open -> SKIPPED (ban, not pick)
+// - slot 6: team PICK with qualifying lead (p = 0.02 < 0.05) open -> QUALIFIES (idx 6)
+// - slot 7: team PICK where strong & qualifying lead are closed, only p=0.12 lead open -> exhausted
 const synthDetail = {
   team_id: "47351",
   slots: [
-    { slot: 1, team_id: "340" },
-    { slot: 2, team_id: "47351" },
-    { slot: 3, team_id: "340" },
-    { slot: 4, team_id: "47351" },
-    { slot: 5, team_id: "47351" },
-    { slot: 6, team_id: "47351" },
+    { slot: 1, team_id: "340", action: "ban" },
+    { slot: 2, team_id: "47351", action: "ban" },
+    { slot: 7, team_id: "47351", action: "pick" },
+    { slot: 8, team_id: "340", action: "pick" },
+    { slot: 10, team_id: "47351", action: "pick" },
+    { slot: 14, team_id: "47351", action: "ban" },
+    { slot: 18, team_id: "47351", action: "pick" },
+    { slot: 19, team_id: "47351", action: "pick" },
   ],
   tells: [
-    { champion: "Azir", slot_states: ["open", "open", "banned", "banned", "banned", "banned"] },
-    { champion: "Orianna", slot_states: ["burned", "burned", "burned", "picked_by_opponent", "open", "picked_by_team"] },
+    // Non-qualifying lead at exact p = 0.05 boundary: open everywhere, must be ignored
+    {
+      champion: "Syndra",
+      label: "lead",
+      p_value: 0.05,
+      slot_states: ["open", "open", "open", "open", "open", "open", "open", "open"],
+    },
+    // Non-qualifying lead with p = 0.12: open everywhere, must be ignored
+    {
+      champion: "Ahri",
+      label: "lead",
+      p_value: 0.12,
+      slot_states: ["open", "open", "open", "open", "open", "open", "open", "open"],
+    },
+    // Strong tell: open at ban idx 1, closed at idx 2, open at opp idx 3 & team pick idx 4, banned afterward
+    {
+      champion: "Azir",
+      label: "strong",
+      p_value: 0.0003,
+      slot_states: ["open", "open", "burned", "open", "open", "banned", "banned", "banned"],
+    },
+    // Qualifying lead (p < 0.05): open at ban idx 5 and team pick idx 6, then taken
+    {
+      champion: "Orianna",
+      label: "lead",
+      p_value: 0.02,
+      slot_states: ["burned", "burned", "burned", "burned", "burned", "open", "open", "picked_by_team"],
+    },
   ],
 };
 
@@ -710,29 +749,49 @@ state.replaySlotIdx = 0;
 renderReplaySlotView();
 if (btn.disabled !== false) throw new Error("Expected button enabled at slot 0");
 
-if (!advanceToNextOpenTellSlot() || state.replaySlotIdx !== 1) {
-  throw new Error("Expected first jump to idx 1, got " + state.replaySlotIdx);
-}
-if (btn.disabled !== false) throw new Error("Expected button still enabled at idx 1");
-
+// Must skip team ban (idx 1), team pick with only p>=0.05 leads (idx 2), and opp pick (idx 3), stopping on strong tell at idx 4
 if (!advanceToNextOpenTellSlot() || state.replaySlotIdx !== 4) {
-  throw new Error("Expected second jump to idx 4, got " + state.replaySlotIdx);
+  throw new Error("Expected first jump to strong-tell pick at idx 4, got " + state.replaySlotIdx);
 }
-if (btn.disabled !== true) throw new Error("Expected button disabled once exhausted at idx 4");
+if (btn.disabled !== false) throw new Error("Expected button still enabled at idx 4");
+
+// Must skip team ban (idx 5) and stop on qualifying p < 0.05 lead at idx 6
+if (!advanceToNextOpenTellSlot() || state.replaySlotIdx !== 6) {
+  throw new Error("Expected second jump to p < 0.05 lead pick at idx 6, got " + state.replaySlotIdx);
+}
+// Slot 7 only has p >= 0.05 leads open, so button must now be disabled
+if (btn.disabled !== true) throw new Error("Expected button disabled once actionable tells exhausted at idx 6");
 
 // No wrap when exhausted
-if (advanceToNextOpenTellSlot() !== false || state.replaySlotIdx !== 4) {
+if (advanceToNextOpenTellSlot() !== false || state.replaySlotIdx !== 6) {
   throw new Error("Expected exhausted jump to return false without wrapping");
 }
 
-// Re-enables on game change
+// Game with only p >= 0.05 leads keeps button disabled from slot 0
+const nonActionableGame = {
+  team_id: "47351",
+  slots: [
+    { slot: 1, team_id: "340", action: "ban" },
+    { slot: 7, team_id: "47351", action: "pick" },
+  ],
+  tells: [
+    { champion: "Ahri", label: "lead", p_value: 0.25, slot_states: ["open", "open"] },
+    { champion: "Syndra", label: "lead", p_value: 0.05, slot_states: ["open", "open"] },
+  ],
+};
+state.replayDetail = nonActionableGame;
+state.replaySlotIdx = 0;
+renderReplaySlotView();
+if (btn.disabled !== true) throw new Error("Expected button disabled when only p >= 0.05 leads exist");
+
+// Re-enables on game change to a game with a strong tell on a team pick
 const freshGame = {
   team_id: "47351",
   slots: [
-    { slot: 1, team_id: "340" },
-    { slot: 2, team_id: "47351" },
+    { slot: 1, team_id: "47351", action: "ban" },
+    { slot: 7, team_id: "47351", action: "pick" },
   ],
-  tells: [{ champion: "Azir", slot_states: ["open", "open"] }],
+  tells: [{ champion: "Azir", label: "strong", p_value: 0.001, slot_states: ["open", "open"] }],
 };
 state.replayDetail = freshGame;
 state.replaySlotIdx = 0;
@@ -745,6 +804,17 @@ state.replayDetail = realDetail;
 state.replaySlotIdx = 0;
 renderReplaySlotView();
 
+const expectedReal = [];
+for (let i = 1; i < realDetail.slots.length; i += 1) {
+  const s = realDetail.slots[i];
+  if (String(s.team_id) === String(realDetail.team_id) && s.action === "pick") {
+    const ok = realDetail.tells.some(
+      (t) => (t.label === "strong" || (t.label !== "strong" && Number(t.p_value) < 0.05)) && t.slot_states[i] === "open"
+    );
+    if (ok) expectedReal.push(i);
+  }
+}
+
 const visited = [];
 while (advanceToNextOpenTellSlot()) {
   const idx = state.replaySlotIdx;
@@ -753,12 +823,19 @@ while (advanceToNextOpenTellSlot()) {
   if (String(slot.team_id) !== String(realDetail.team_id)) {
     throw new Error("Jumped to non-team slot " + idx);
   }
-  const hasOpen = realDetail.tells.some((t) => t.slot_states[idx] === "open");
-  if (!hasOpen) {
-    throw new Error("Jumped to slot with no open tells: " + idx);
+  if (slot.action !== "pick") {
+    throw new Error("Jumped to non-pick slot " + idx + " (" + slot.action + ")");
+  }
+  const hasActionableOpen = realDetail.tells.some(
+    (t) => (t.label === "strong" || isQualifyingActionLead(t)) && t.slot_states[idx] === "open"
+  );
+  if (!hasActionableOpen) {
+    throw new Error("Jumped to slot with no actionable open tells: " + idx);
   }
 }
-if (visited.length === 0) throw new Error("Expected at least one qualifying slot in fixture replay");
+if (JSON.stringify(visited) !== JSON.stringify(expectedReal)) {
+  throw new Error("Fixture replay visited mismatch: got " + JSON.stringify(visited) + ", expected " + JSON.stringify(expectedReal));
+}
 if (btn.disabled !== true) throw new Error("Expected button disabled after exhausting fixture replay");
 
 console.log(JSON.stringify({ visited, renders }));
@@ -772,4 +849,4 @@ console.log(JSON.stringify({ visited, renders }));
         )
         assert proc.returncode == 0, f"Node test failed:\nSTDOUT: {proc.stdout}\nSTDERR: {proc.stderr}"
         result = json.loads(proc.stdout.strip())
-        assert len(result["visited"]) > 0
+        assert isinstance(result["visited"], list)
