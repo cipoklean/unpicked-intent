@@ -215,13 +215,13 @@ def run_pipeline(grid_path: str) -> None:
         grid_path: Path to the GRID starter repo root (contains data/ and meta/).
     """
     from unpicked_intent.ingest.feeds import iter_draft_events
+    from unpicked_intent.pipeline.legal_pool import resolve_champion_games
     from unpicked_intent.pipeline.normalize import (
         apply_undos,
         assign_slots,
         check_completeness,
         flag_games,
     )
-    from unpicked_intent.pipeline.legal_pool import resolve_champion_games
     from unpicked_intent.roles.champion_roles import load
 
     grid = Path(grid_path)

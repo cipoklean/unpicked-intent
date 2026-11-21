@@ -4,19 +4,19 @@ import csv
 from pathlib import Path
 from unittest.mock import patch
 
-from unpicked_intent.ingest.feeds import iter_draft_events, IngestStats
+from unpicked_intent.ingest.feeds import IngestStats, iter_draft_events
+from unpicked_intent.pipeline.legal_pool import (
+    _burned_champions,
+    legal_pool,
+    resolve_champion_games,
+)
 from unpicked_intent.pipeline.normalize import (
+    DRAFT_SIDE_ORDER,
+    NormalizeStats,
     apply_undos,
     assign_slots,
     check_completeness,
     flag_games,
-    NormalizeStats,
-    DRAFT_SIDE_ORDER,
-)
-from unpicked_intent.pipeline.legal_pool import (
-    legal_pool,
-    resolve_champion_games,
-    _burned_champions,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -829,7 +829,7 @@ class TestInferPlayers:
 
     def test_infer_returns_role_and_share(self):
         """infer() returns role, share, and flex for each player."""
-        from unpicked_intent.roles.infer_players import infer, build_champion_history
+        from unpicked_intent.roles.infer_players import build_champion_history, infer
 
         history = build_champion_history(ROSTERS_CSV)
         priors = _load_champion_roles()
@@ -842,7 +842,7 @@ class TestInferPlayers:
 
     def test_specialized_player_not_flex(self):
         """A player who only plays one role has share=1.0 and flex=False."""
-        from unpicked_intent.roles.infer_players import infer, build_champion_history
+        from unpicked_intent.roles.infer_players import build_champion_history, infer
 
         history = build_champion_history(ROSTERS_CSV)
         priors = _load_champion_roles()
@@ -855,7 +855,7 @@ class TestInferPlayers:
 
     def test_flex_player_flagged(self):
         """A player who plays 4 different roles equally is flagged as flex."""
-        from unpicked_intent.roles.infer_players import infer, build_champion_history
+        from unpicked_intent.roles.infer_players import build_champion_history, infer
 
         history = build_champion_history(ROSTERS_CSV)
         priors = _load_champion_roles()
@@ -938,8 +938,9 @@ class TestInferPlayers:
 
     def test_apply_overrides_changes_role(self):
         """apply_overrides() replaces the inferred role when the file exists."""
-        from unpicked_intent.roles.infer_players import infer, apply_overrides
         import tempfile
+
+        from unpicked_intent.roles.infer_players import apply_overrides, infer
 
         history = {"P1": ["Aatrox", "Darius", "Azir", "Graves"]}
         priors = _load_champion_roles()
@@ -957,7 +958,7 @@ class TestInferPlayers:
 
     def test_apply_overrides_no_file(self):
         """apply_overrides() is a no-op when the overrides file doesn't exist."""
-        from unpicked_intent.roles.infer_players import infer, apply_overrides
+        from unpicked_intent.roles.infer_players import apply_overrides, infer
 
         history = {"P1": ["Aatrox"]}
         priors = _load_champion_roles()
@@ -1000,8 +1001,8 @@ class TestInferPlayers:
     def test_map_team_picks_with_roles_attaches_role(self):
         """map_team_picks_with_roles() attaches the inferred role to each pick."""
         from unpicked_intent.roles.infer_players import (
-            infer,
             build_champion_history,
+            infer,
             map_team_picks_with_roles,
         )
 
@@ -1024,8 +1025,9 @@ class TestInferPlayers:
 
     def test_write_player_roles_creates_csv(self):
         """write_player_roles() writes a valid CSV under derived/."""
-        from unpicked_intent.roles.infer_players import write_player_roles
         import tempfile
+
+        from unpicked_intent.roles.infer_players import write_player_roles
 
         inferred = {
             "P1": {"role": "top", "share": 1.0, "flex": False},
@@ -1059,8 +1061,9 @@ class TestBuildPipeline:
 
     def test_run_pipeline_on_synthetic_fixtures(self):
         """run_pipeline processes synthetic fixtures and writes DuckDB."""
-        import tempfile
         import shutil
+        import tempfile
+
         from unpicked_intent.pipeline.build import run_pipeline
 
         # Create a synthetic GRID repo structure
@@ -1160,7 +1163,9 @@ class TestBuildPipeline:
         """Every table's row count and SUM(hash(*)) checksum match between executemany and _bulk_insert."""
         import csv
         import tempfile
+
         import duckdb
+
         import unpicked_intent.pipeline.build as build_mod
         import unpicked_intent.scoring.baseline as baseline_mod
         import unpicked_intent.scoring.signals as signals_mod
@@ -1434,7 +1439,7 @@ class TestBaseline:
 
     def test_mean_ban_slot_computed_at_min_bans(self):
         """mean_ban_slot is computed when bans >= MIN_BANS."""
-        from unpicked_intent.scoring.baseline import compute_baseline, MIN_BANS
+        from unpicked_intent.scoring.baseline import MIN_BANS, compute_baseline
 
         # Exactly MIN_BANS bans at slot 3 each
         # Need at least one cg_row so the patch window is created
@@ -1483,7 +1488,11 @@ class TestBaseline:
 
     def test_baseline_constants(self):
         """META_PRESENCE, MIN_BANS, and MIN_WINDOW_GAMES are named constants."""
-        from unpicked_intent.scoring.baseline import META_PRESENCE, MIN_BANS, MIN_WINDOW_GAMES
+        from unpicked_intent.scoring.baseline import (
+            META_PRESENCE,
+            MIN_BANS,
+            MIN_WINDOW_GAMES,
+        )
 
         assert META_PRESENCE == 0.10
         assert MIN_BANS == 10
@@ -1574,8 +1583,9 @@ class TestBaseline:
         This is the path that crashed with KeyError 'patch' because champion_game
         has no patch column — must be joined from draft_events.
         """
-        import tempfile
         import shutil
+        import tempfile
+
         from unpicked_intent.pipeline.build import run_pipeline
         from unpicked_intent.scoring.baseline import run_baseline
 
@@ -2210,9 +2220,11 @@ class TestSignals:
         - left_open has rows (lo_count > 0) with q_value
         - early_ban has rows (eb_count > 0)
         """
-        import tempfile
         import csv
+        import tempfile
+
         import duckdb
+
         from tests.fixtures.create_synthetic import build_rich_synthetic_grid
         from unpicked_intent.pipeline.build import run_pipeline
         from unpicked_intent.scoring.baseline import run_baseline
@@ -2348,9 +2360,11 @@ class TestSignals:
 
         left_open, early_ban, and baseline should use CREATE OR REPLACE TABLE.
         """
-        import tempfile
         import csv
+        import tempfile
+
         import duckdb
+
         from tests.fixtures.create_synthetic import build_rich_synthetic_grid
         from unpicked_intent.pipeline.build import run_pipeline
         from unpicked_intent.scoring.baseline import run_baseline
@@ -2464,7 +2478,9 @@ class TestSignals:
     def test_run_baseline_honors_grid_path_argument(self):
         """Passing grid_path directly to run_baseline() builds the DB first."""
         import tempfile
+
         import duckdb
+
         import unpicked_intent.pipeline.build as build_mod
         import unpicked_intent.scoring.baseline as baseline_mod
         from tests.fixtures.create_synthetic import build_rich_synthetic_grid
@@ -2499,7 +2515,9 @@ class TestSignals:
     def test_run_all_orchestrates_full_pipeline_and_optional_export(self):
         """pipeline.run_all runs build -> infer_players -> baseline -> signals -> export_static."""
         import tempfile
+
         import duckdb
+
         import unpicked_intent.api.main as api_mod
         import unpicked_intent.pipeline.build as build_mod
         import unpicked_intent.pipeline.run_all as run_all_mod
