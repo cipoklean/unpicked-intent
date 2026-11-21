@@ -13,7 +13,7 @@ the story is what happened next: after every push, an independent run on the
 full GRID dataset (1,716 pro games) checked the result against known totals,
 and that run found **15 real-data bugs that every green test had missed**.
 Each one went back to Junie as a fix prompt, and each fix added a test that
-would have caught it. The suite grew from 20 tests to 147.
+would have caught it. The suite grew from 20 tests to 149.
 
 ## Setup
 
@@ -103,5 +103,6 @@ Junie implemented; decisions that change what the tool *claims* stayed with me:
 | 2026-11-20 | 5109d79 | Full code/lint/CI cleanup (0 ruff errors, O(N) legal-pool grouping, dead-code removal, `played_at` sort fallback, `pipeline/run_all.py` single-command runner, `.gitignore`/`.aiignore` fixes) & hackathon README curation | 142 |
 | 2026-11-21 | a841dbc | Draft Replay view: target-team 5-game replay API (`/replay/{team_id}/games`, `/replay/{team_id}/{game_id}`) with Fearless burned + per-slot tell states, static exporter support, 20-cell Blue/Red slot stepper UI, and API/export tests | 145 |
 | 2026-11-21 | 6544a1f | UI framing tweaks (no scoring changes): `GET /meta` (`total_tests`) + `data/meta.json` export, BH honesty-bar copy across Silence Report & Draft Replay, muted 0-strong KPI with subtitle, `strong_count` on `/teams` + strong-tell default opponent in `getDefaultOpponentId()` | 147 |
+| 2026-11-21 | ec5e2fa | Forensic UI polish passes 1–4 (sentence-case labels, quiet KPI strip + live `Patterns tested` chip, 6-col tells table dropping duplicate `n`/`Obs`/`Exp`, cyan accent consolidation) & Draft Replay "Next open tell" button + `n` shortcut | 149 |
 
 *Current status: scouting API, offline Silence Report + Draft Replay web UI, and static Vercel site live at https://unpicked-intent.vercel.app. Next: re-export and redeploy Draft Replay to Vercel, capture PyCharm/Junie session screenshots (before ~Dec 20 Pro trial expiry), and record the ≤3 min demo video (by Jan 5).*
