@@ -2,6 +2,7 @@
 
 /* Unpicked Intent — Silence Report & Draft Replay Frontend
  * Plain offline JS talking strictly to FastAPI endpoints:
+ *   GET /meta
  *   GET /teams
  *   GET /silence/{team_id}
  *   GET /self-scout
@@ -9,7 +10,7 @@
  *   GET /replay/{team_id}/{game_id}
  */
 
-const TARGET_TEAM_IDS = new Set([
+const TARGET_TEAMS_ORDER = [
   "340",
   "47363",
   "54198",
@@ -18,7 +19,8 @@ const TARGET_TEAM_IDS = new Set([
   "47499",
   "56389",
   "47351",
-]);
+];
+const TARGET_TEAM_IDS = new Set(TARGET_TEAMS_ORDER);
 const SELF_SCOUT_TEAM_ID = "47351";
 
 const ROLE_ORDER = ["top", "jungle", "mid", "bot", "support"];
@@ -53,6 +55,7 @@ const PHASE_SHORT = {
 
 const state = {
   teams: [],
+  totalTests: null,
   teamQuery: "",
   activeTeamId: null,
   lastOpponentTeamId: null,
@@ -89,7 +92,9 @@ const els = {
   reportContent: document.getElementById("report-content"),
   reportModeEyebrow: document.getElementById("report-mode-eyebrow"),
   reportTeamName: document.getElementById("report-team-name"),
+  kpiStrongChip: document.getElementById("kpi-strong-chip"),
   kpiStrongCount: document.getElementById("kpi-strong-count"),
+  kpiStrongSub: document.getElementById("kpi-strong-sub"),
   kpiLeadCount: document.getElementById("kpi-lead-count"),
   kpiEarlyBanCount: document.getElementById("kpi-early-ban-count"),
   viewTabs: document.getElementById("view-tabs"),
@@ -181,6 +186,7 @@ const IS_STATIC = document.documentElement.dataset.static === "1";
 
 function resolveDataUrl(endpoint) {
   if (!IS_STATIC) return endpoint;
+  if (endpoint === "/meta") return "data/meta.json";
   if (endpoint === "/teams") return "data/teams.json";
   if (endpoint === "/self-scout") return "data/self-scout.json";
   if (endpoint.startsWith("/silence/")) {
@@ -1266,7 +1272,10 @@ function renderReport(report, preferredReplayGameId = null) {
   const strongCount = tells.filter((t) => t.label === "strong").length;
   const leadCount = tells.length - strongCount;
 
+  const hasStrong = strongCount > 0;
   els.kpiStrongCount.textContent = String(strongCount);
+  els.kpiStrongChip.classList.toggle("kpi-strong-zero", !hasStrong);
+  els.kpiStrongSub.classList.toggle("hidden", hasStrong);
   els.kpiLeadCount.textContent = String(leadCount);
   els.kpiEarlyBanCount.textContent = String(bans.length);
 
@@ -1381,7 +1390,26 @@ async function loadTeamReport(teamId, updateHash = true, targetView = "silence",
   }
 }
 
+function renderTotalTestsCount(totalTests) {
+  const num = Number(totalTests);
+  if (!Number.isFinite(num) || num < 0) return;
+  const formatted = num.toLocaleString("en-US");
+  document.querySelectorAll(".total-tests-count").forEach((el) => {
+    el.textContent = formatted;
+  });
+}
+
 function getDefaultOpponentId() {
+  // With no explicit hash, pick the first TARGET_TEAMS opponent (excluding Cloud9 Kia)
+  // that has at least one strong tell, while keeping the rail order untouched.
+  const teamsById = new Map(state.teams.map((t) => [String(t.team_id), t]));
+  for (const tid of TARGET_TEAMS_ORDER) {
+    if (tid === SELF_SCOUT_TEAM_ID) continue;
+    const team = teamsById.get(tid);
+    if (team && Number(team.strong_count) > 0) {
+      return tid;
+    }
+  }
   const firstOpponent = state.teams.find((t) => String(t.team_id) !== SELF_SCOUT_TEAM_ID);
   if (firstOpponent) return String(firstOpponent.team_id);
   return state.teams.length > 0 ? String(state.teams[0].team_id) : SELF_SCOUT_TEAM_ID;
@@ -1422,8 +1450,15 @@ async function initApp() {
   renderLoadingState("Loading teams…");
 
   try {
-    const teams = await fetchJson("/teams");
+    const [teams, meta] = await Promise.all([
+      fetchJson("/teams"),
+      fetchJson("/meta").catch(() => null),
+    ]);
     state.teams = Array.isArray(teams) ? teams : [];
+    if (meta && Number.isFinite(Number(meta.total_tests))) {
+      state.totalTests = Number(meta.total_tests);
+      renderTotalTestsCount(state.totalTests);
+    }
     els.dbStatusPill.textContent = `${state.teams.length} teams ready`;
     els.dbStatusPill.className = "status-pill is-ok";
     renderTeamList();

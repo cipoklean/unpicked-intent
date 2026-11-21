@@ -83,6 +83,7 @@ def export_static(out_dir: str | Path) -> dict[str, int | str]:
         silence_payloads.append((team_id, payload))
 
     self_scout_bytes = _get_200_json_bytes(client, "/self-scout")
+    meta_bytes = _get_200_json_bytes(client, "/meta")
 
     # Fetch Draft Replay payloads for every target team (5 most recent complete games each).
     replay_games_payloads: list[tuple[str, bytes]] = []
@@ -119,6 +120,7 @@ def export_static(out_dir: str | Path) -> dict[str, int | str]:
     replay_dir.mkdir(parents=True, exist_ok=True)
 
     (data_dir / "teams.json").write_bytes(teams_bytes)
+    (data_dir / "meta.json").write_bytes(meta_bytes)
     for team_id, payload in silence_payloads:
         (silence_dir / f"{team_id}.json").write_bytes(payload)
     (data_dir / "self-scout.json").write_bytes(self_scout_bytes)
@@ -176,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
         f"Exported static site to {summary['out_dir']}: "
         f"{summary['teams']} teams, {summary['silence_files']} silence files, "
         f"{summary['replay_teams']} replay teams ({summary['replay_games']} games), "
-        "self-scout.json, and web assets."
+        "meta.json, self-scout.json, and web assets."
     )
     return 0
 

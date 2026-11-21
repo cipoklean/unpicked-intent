@@ -4,7 +4,8 @@ Never expose raw feed rows or read raw feeds. DuckDB is opened read-only.
 
 Endpoints:
     GET /health                       — liveness probe
-    GET /teams                        — teams with tell and early-ban counts, target teams first
+    GET /meta                         — dataset-level methodology counts (total_tests, min_n)
+    GET /teams                        — teams with tell, strong, and early-ban counts, target teams first
     GET /silence/{team_id}            — ranked left-open tells + early-ban pressure (n >= 4 only)
     GET /self-scout                   — same as /silence/47351 (Cloud9 Kia)
     GET /replay/{team_id}/games       — 5 most recent complete games for a target team
@@ -63,9 +64,29 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/meta")
+def get_meta() -> dict:
+    """Return dataset-level methodology counts from derived/unpicked.duckdb."""
+    con = _connect_readonly()
+    try:
+        row = con.execute(
+            "SELECT COUNT(*) FROM left_open WHERE k >= ?",
+            [MIN_N],
+        ).fetchone()
+        total_tests = int(row[0]) if row is not None else 0
+    finally:
+        con.close()
+
+    return {
+        "total_tests": total_tests,
+        "min_n": MIN_N,
+        "strong_q_threshold": STRONG_Q_THRESHOLD,
+    }
+
+
 @app.get("/teams")
 def list_teams() -> list[dict]:
-    """Return all teams with their name, left_open count, and early_ban count.
+    """Return all teams with their name, left_open, strong, and early_ban counts.
 
     Target teams (TARGET_TEAMS) are listed first in their defined order,
     followed by all other teams sorted by name.
@@ -78,10 +99,19 @@ def list_teams() -> list[dict]:
         team_names: dict[str, str] = {str(r[0]): str(r[1]) for r in name_rows}
 
         lo_rows = con.execute(
-            "SELECT team, COUNT(*) FROM left_open WHERE k >= ? GROUP BY team",
-            [MIN_N],
+            """
+            SELECT
+                team,
+                COUNT(*) AS left_open_count,
+                SUM(CASE WHEN q_value < ? THEN 1 ELSE 0 END) AS strong_count
+            FROM left_open
+            WHERE k >= ?
+            GROUP BY team
+            """,
+            [STRONG_Q_THRESHOLD, MIN_N],
         ).fetchall()
         lo_counts: dict[str, int] = {str(r[0]): int(r[1]) for r in lo_rows}
+        strong_counts: dict[str, int] = {str(r[0]): int(r[2] or 0) for r in lo_rows}
 
         eb_rows = con.execute(
             "SELECT team, COUNT(*) FROM early_ban GROUP BY team"
@@ -105,6 +135,7 @@ def list_teams() -> list[dict]:
                 "team_id": tid,
                 "name": team_names.get(tid, tid),
                 "left_open_count": lo_counts.get(tid, 0),
+                "strong_count": strong_counts.get(tid, 0),
                 "early_ban_count": eb_counts.get(tid, 0),
             }
         )
@@ -485,5 +516,5 @@ def replay_game_detail(team_id: str, game_id: str) -> dict:
 
 
 # Mount the plain HTML/CSS/JS Silence Report UI at / AFTER all API routes so
-# /health, /teams, /silence/{team_id}, /self-scout, and /replay/* always match first.
+# /health, /meta, /teams, /silence/{team_id}, /self-scout, and /replay/* always match first.
 app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")

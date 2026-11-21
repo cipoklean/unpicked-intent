@@ -103,6 +103,12 @@ def test_export_writes_exact_api_responses(synthetic_export_db, tmp_path):
     assert summary["teams"] == len(api_teams)
     assert summary["silence_files"] == len(api_teams)
 
+    meta_file = out_dir / "data" / "meta.json"
+    assert meta_file.is_file()
+    exported_meta = json.loads(meta_file.read_text(encoding="utf-8"))
+    assert exported_meta == client.get("/meta").json()
+    assert exported_meta["total_tests"] == sum(t["left_open_count"] for t in exported_teams)
+
     silence_dir = out_dir / "data" / "silence"
     assert silence_dir.is_dir()
     exported_silence_files = sorted(p.name for p in silence_dir.iterdir() if p.is_file())
@@ -176,6 +182,7 @@ def test_export_web_assets_static_flag_and_offline(synthetic_export_db, tmp_path
 
     # Relative static paths in app.js
     js_text = dist_js.read_text(encoding="utf-8")
+    assert "data/meta.json" in js_text
     assert "data/teams.json" in js_text
     assert "data/self-scout.json" in js_text
     assert "data/silence/${teamId}.json" in js_text
@@ -231,6 +238,7 @@ def test_cli_main_exports_successfully(synthetic_export_db, tmp_path, capsys):
     assert "Exported static site" in captured.out
     assert (out_dir / "index.html").is_file()
     assert (out_dir / "data" / "teams.json").is_file()
+    assert (out_dir / "data" / "meta.json").is_file()
 
 
 def test_data_boundary_ignores_and_blocks_dist():

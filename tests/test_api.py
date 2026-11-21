@@ -96,6 +96,34 @@ class TestApi:
         assert resp.status_code == 200
         assert resp.json() == {"status": "ok"}
 
+    def test_meta_endpoint_counts_qualifying_left_open(self, synthetic_api_db):
+        """GET /meta returns exact count of left_open rows with k >= 4."""
+        client = TestClient(api_mod.app)
+        resp = client.get("/meta")
+        assert resp.status_code == 200
+        meta = resp.json()
+        assert meta["min_n"] == 4
+        assert meta["strong_q_threshold"] == pytest.approx(0.2)
+
+        teams = client.get("/teams").json()
+        expected_total = sum(t["left_open_count"] for t in teams)
+        assert meta["total_tests"] == expected_total
+        assert meta["total_tests"] > 0
+
+        # Inserting a k < 4 row must NOT change total_tests, while k >= 4 must increment it.
+        con = duckdb.connect(str(synthetic_api_db))
+        con.executemany(
+            "INSERT INTO left_open VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("T1", "P1", "top", "Teemo", 3, 0, 1.5, 0.01, 0.05, 0.5),
+                ("T1", "P1", "top", "Mordekaiser", 5, 0, 2.5, 0.01, 0.05, 0.5),
+            ],
+        )
+        con.close()
+
+        meta_after = client.get("/meta").json()
+        assert meta_after["total_tests"] == expected_total + 1
+
     def test_teams_lists_target_teams_first_with_counts(self, synthetic_api_db):
         client = TestClient(api_mod.app)
         resp = client.get("/teams")
@@ -114,9 +142,43 @@ class TestApi:
         assert by_id["47351"]["left_open_count"] > 0
         assert by_id["47351"]["early_ban_count"] > 0
         assert by_id["340"]["early_ban_count"] > 0
+        assert "strong_count" in by_id["47351"]
+        assert "strong_count" in by_id["340"]
 
         # Valorant team must not appear
         assert "V1" not in by_id
+
+    def test_teams_strong_count_preserves_target_order(self, synthetic_api_db):
+        """strong_count counts q < 0.2 rows (k >= 4) without reordering TARGET_TEAMS."""
+        con = duckdb.connect(str(synthetic_api_db))
+        con.execute("DELETE FROM left_open WHERE team IN ('340', '56389')")
+        con.executemany(
+            "INSERT INTO names VALUES (?, ?, ?)",
+            [("team", "56389", "Sentinels")],
+        )
+        con.executemany(
+            "INSERT INTO left_open VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                # FlyQuest (340): lead only (q = 0.25)
+                ("340", "P6", "top", "Aatrox", 6, 1, 3.0, 0.08, 0.25, 0.4),
+                # Sentinels (56389): 1 strong (q = 0.05) + 1 boundary lead (q = 0.2) + 1 k=3 ignored
+                ("56389", "P2", "mid", "Azir", 21, 2, 8.3, 0.0003, 0.05, 0.3),
+                ("56389", "P2", "mid", "Orianna", 6, 1, 3.0, 0.05, 0.2, 0.3),
+                ("56389", "P2", "mid", "Syndra", 3, 0, 1.5, 0.001, 0.01, 0.3),
+            ],
+        )
+        con.close()
+
+        client = TestClient(api_mod.app)
+        teams = client.get("/teams").json()
+        team_ids = [t["team_id"] for t in teams]
+        # Rail order must keep TARGET_TEAMS order: 340 (FlyQuest) before 56389 (Sentinels) before 47351 (C9)
+        assert team_ids[:3] == ["340", "56389", "47351"]
+
+        by_id = {t["team_id"]: t for t in teams}
+        assert by_id["340"]["strong_count"] == 0
+        assert by_id["56389"]["left_open_count"] == 2
+        assert by_id["56389"]["strong_count"] == 1
 
     def test_silence_endpoint_shape_and_sorting(self, synthetic_api_db):
         client = TestClient(api_mod.app)
@@ -222,6 +284,7 @@ class TestApi:
                 client = TestClient(api_mod.app)
 
                 for endpoint in (
+                    "/meta",
                     "/teams",
                     "/silence/47351",
                     "/self-scout",
@@ -247,6 +310,7 @@ class TestApi:
         monkeypatch.setattr(api_mod.duckdb, "connect", spy_connect)
 
         client = TestClient(api_mod.app)
+        assert client.get("/meta").status_code == 200
         assert client.get("/teams").status_code == 200
         assert client.get("/silence/47351").status_code == 200
         assert client.get("/self-scout").status_code == 200
@@ -255,7 +319,7 @@ class TestApi:
         first_gid = games_resp.json()["games"][0]["game_id"]
         assert client.get(f"/replay/47351/{first_gid}").status_code == 200
 
-        assert len(seen_kwargs) == 5
+        assert len(seen_kwargs) == 6
         assert all(kw.get("read_only") is True for kw in seen_kwargs)
 
     def test_replay_games_returns_5_most_recent_for_target_team(self, synthetic_api_db):
@@ -407,10 +471,18 @@ class TestWebUI:
         assert "UNPICKED INTENT" in html
         assert "Self-scout: Cloud9 Kia" in html
         assert "Only tells with at least 4 qualifying games are shown." in html
+        assert "We only show tells with at least 4 qualifying games." in html
+        assert "Strict filter: none survive correction yet" in html
         assert (
             "Leads are patterns worth watching; strong tells survive correction "
             "for testing thousands of patterns."
-        ) in html
+        ) not in html
+        expected_explainer = (
+            'STRONG (q &lt; 0.2) survives Benjamini-Hochberg correction across '
+            '<span class="total-tests-count">2,029</span> tested player-champion '
+            "patterns. LEADS are directional: real patterns, not yet proven."
+        )
+        assert html.count(expected_explainer) == 2
         assert 'href="/styles.css"' in html
         assert 'src="/app.js"' in html
 
@@ -459,6 +531,7 @@ class TestWebUI:
             return out
 
         concrete_paths = sorted({_materialize(url) for url in raw_urls})
+        assert "/meta" in concrete_paths
         assert "/teams" in concrete_paths
         assert "/self-scout" in concrete_paths
         assert "/silence/47351" in concrete_paths
@@ -501,3 +574,11 @@ class TestWebUI:
         assert "ACTION_LEAD_MAX_P = 0.05" in js
         assert "Open now, history says they skip it" in js
         assert "data/replay/${rest}.json" in js
+        assert "data/meta.json" in js
+        assert "kpi-strong-zero" in js
+        assert "TARGET_TEAMS_ORDER" in js
+        assert "strong_count" in js
+
+        css = client.get("/styles.css").text
+        assert ".kpi-chip.kpi-strong.kpi-strong-zero" in css
+        assert ".kpi-sub" in css

@@ -100,9 +100,10 @@
             </div>
 
             <div class="kpi-strip" aria-label="Report summary counts">
-              <div class="kpi-chip kpi-strong">
+              <div id="kpi-strong-chip" class="kpi-chip kpi-strong kpi-strong-zero">
                 <span class="kpi-label">Strong tells (q &lt; 0.2)</span>
                 <span id="kpi-strong-count" class="kpi-value">0</span>
+                <span id="kpi-strong-sub" class="kpi-sub">Strict filter: none survive correction yet</span>
               </div>
               <div class="kpi-chip kpi-lead">
                 <span class="kpi-label">Leads (q &ge; 0.2)</span>
@@ -154,7 +155,7 @@
               <span class="badge-mini badge-strong">STRONG</span>
               <span class="badge-mini badge-lead">LEAD</span>
               <span>
-                Leads are patterns worth watching; strong tells survive correction for testing thousands of patterns.
+                STRONG (q &lt; 0.2) survives Benjamini-Hochberg correction across <span class="total-tests-count">2,029</span> tested player-champion patterns. LEADS are directional: real patterns, not yet proven.
               </span>
             </div>
           </section>
@@ -256,7 +257,7 @@
                 <span class="badge-mini badge-strong">STRONG</span>
                 <span class="badge-mini badge-lead">LEAD</span>
                 <span>
-                  Leads are patterns worth watching; strong tells survive correction for testing thousands of patterns.
+                  STRONG (q &lt; 0.2) survives Benjamini-Hochberg correction across <span class="total-tests-count">2,029</span> tested player-champion patterns. LEADS are directional: real patterns, not yet proven.
                 </span>
               </div>
             </section>

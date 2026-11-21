@@ -609,6 +609,11 @@ body.is-self-scout .report-mode-eyebrow {
   background: rgba(245, 183, 49, 0.05);
 }
 
+.kpi-chip.kpi-strong.kpi-strong-zero {
+  border-color: var(--border-subtle);
+  background: var(--bg-panel);
+}
+
 .kpi-label {
   font-size: 10.5px;
   color: var(--text-muted);
@@ -627,6 +632,17 @@ body.is-self-scout .report-mode-eyebrow {
 
 .kpi-chip.kpi-strong .kpi-value {
   color: var(--strong-text);
+}
+
+.kpi-chip.kpi-strong.kpi-strong-zero .kpi-value {
+  color: var(--text-secondary);
+}
+
+.kpi-sub {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  line-height: 1.25;
 }
 
 .kpi-chip.kpi-lead .kpi-value {
